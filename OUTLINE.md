@@ -248,11 +248,15 @@ socket. Integers on the wire are u32 little-endian.
 `maxWallMs`; the orchestrator kills QEMU at the limit, returns a timeout error,
 and archives the boot log. (CPU/mem/disk caps per the profile table elsewhere.)
 
-> Status: artifacts (`vmlinux`, template `initrd.zip`, FAT16 build tool) are not
-> yet in-repo. The launcher is implemented to these conventions and **gated on
-> artifact presence** (`LUALAMBDA_KERNEL` etc.) — it no-ops cleanly until they
-> land, so the pure host-side parts (record codec, port allocation, timeouts)
-> are unit-tested now and the QEMU path is exercised once artifacts arrive.
+> Status: **working end-to-end.** The MicroNT artifacts are vendored in
+> `vendor/micront/` (`vmlinux` + `initrd.zip`, version-controlled; no upstream
+> release pipeline). The FAT16 data disk is built in pure TS (`src/shared/fat16`
+> + `mbr` + `drive`, ported from `nt.fs.*`) — no `mkfs.fat`/`mtools`. A real
+> boot mounts it via the guest's `nvme2k` + `fastfat`, and a full
+> CLI→orchestrator→QEMU invoke of the `hello` package returns its result in ~1s.
+> Our `pkg/main.lua` is applied via the local overlay (`src/guest/overlay/`),
+> since MicroNT is built for dropping in your own init module on top of the
+> stable `launch.lua`/`preamble.lua` shape.
 
 ## Build plan (hackathon-scoped)
 

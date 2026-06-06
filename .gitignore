@@ -22,7 +22,7 @@ secrets/
 # Orchestrator runtime data (deployed bundles, metadata)
 .lualambda/
 
-# QEMU / VM artifacts
+# QEMU / VM artifacts (per-instance / scratch — NOT the vendored ones below)
 *.img
 *.qcow2
 initrd.zip
@@ -34,4 +34,10 @@ initrd.zip
 # Claude Code local (personal) settings — shared config goes in settings.json
 .claude/settings.local.json
 
+# Scratch dir for ad-hoc artifact drops / experiments.
 tmp/
+
+# Vendored MicroNT artifacts are version-controlled (small, no upstream release
+# pipeline). Re-include them despite the *.img / initrd.zip rules above.
+!vendor/
+!vendor/micront/initrd.zip

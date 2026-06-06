@@ -36,15 +36,15 @@ export const config = {
 
   /**
    * PVH loader ELF (MicroNT vmlinux). Required to actually boot a VM. Defaults
-   * to the in-repo artifact under tmp/; override in production.
+   * to the version-controlled vendored artifact; override in production.
    */
-  kernelPath: env('LUALAMBDA_KERNEL', 'tmp/vmlinux'),
+  kernelPath: env('LUALAMBDA_KERNEL', 'vendor/micront/vmlinux'),
   /**
    * Template initrd.zip (base system + baked-in agent pkg/main.lua). Per
-   * instance we rebuild a copy with the user's pkg/*.zip appended. Defaults to
-   * the in-repo artifact under tmp/; override in production.
+   * instance we rebuild a copy with our overlay + the user's pkg/*.zip merged
+   * in. Defaults to the version-controlled vendored artifact; override in prod.
    */
-  initrdTemplatePath: env('LUALAMBDA_INITRD_TEMPLATE', 'tmp/initrd.zip'),
+  initrdTemplatePath: env('LUALAMBDA_INITRD_TEMPLATE', 'vendor/micront/initrd.zip'),
   /** QEMU binary; machine type (q35 gives PCI for virtio-net + NVMe). */
   qemuBinary: env('LUALAMBDA_QEMU', 'qemu-system-x86_64'),
   qemuMachine: env('LUALAMBDA_QEMU_MACHINE', 'q35'),
