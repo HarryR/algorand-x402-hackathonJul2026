@@ -2,8 +2,8 @@
  * Client-side Algorand testnet wallet for the CLI.
  *
  * Key source precedence: `LUALAMBDA_MNEMONIC` env var wins; otherwise the wallet
- * file at `config.walletPath` (default ~/.config/lualambda/wallet.json, mode
- * 0600). Testnet only — never store mainnet keys here.
+ * file at `walletPath()` (default ~/.config/lualambda/wallet.json, mode 0600).
+ * Testnet only — never store mainnet keys here.
  *
  * Exposes the ops the CLI `wallet` subcommands need plus the signer key the x402
  * client uses. The signer-key encoding (base64 of the 64-byte sk) is isolated in
@@ -11,11 +11,23 @@
  */
 
 import { mkdirSync, chmodSync, existsSync, readFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 import algosdk from 'algosdk';
 import { config } from '@/shared/config.ts';
 
 const WALLET_VERSION = 1;
+
+/**
+ * The wallet file path, resolved LIVE from `LUALAMBDA_WALLET` each call (default
+ * ~/.config/lualambda/wallet.json). Read live — not captured from config — so a
+ * caller (or a test) that sets the env var is always honored regardless of
+ * module load order. This is the single source of the path; every read/write
+ * below goes through it so tests can never touch a real wallet.
+ */
+export function walletPath(): string {
+  return process.env.LUALAMBDA_WALLET || join(homedir(), '.config', 'lualambda', 'wallet.json');
+}
 
 interface WalletFile {
   version: number;
@@ -35,8 +47,8 @@ export interface Balances {
 function resolveMnemonic(): string {
   const fromEnv = process.env.LUALAMBDA_MNEMONIC?.trim();
   if (fromEnv) return fromEnv;
-  if (existsSync(config.walletPath)) {
-    const wf = JSON.parse(readFileSync(config.walletPath, 'utf8')) as WalletFile;
+  if (existsSync(walletPath())) {
+    const wf = JSON.parse(readFileSync(walletPath(), 'utf8')) as WalletFile;
     if (wf.mnemonic) return wf.mnemonic;
   }
   throw new Error(
@@ -64,14 +76,14 @@ function writeWalletFile(account: algosdk.Account): void {
     mnemonic: algosdk.secretKeyToMnemonic(account.sk),
     network: config.algorandNetwork,
   };
-  mkdirSync(dirname(config.walletPath), { recursive: true });
-  Bun.write(config.walletPath, JSON.stringify(file, null, 2));
-  chmodSync(config.walletPath, 0o600);
+  mkdirSync(dirname(walletPath()), { recursive: true });
+  Bun.write(walletPath(), JSON.stringify(file, null, 2));
+  chmodSync(walletPath(), 0o600);
 }
 
 export function createWallet(force: boolean): { address: string } {
-  if (existsSync(config.walletPath) && !force) {
-    throw new Error(`wallet already exists at ${config.walletPath} (use --force to overwrite)`);
+  if (existsSync(walletPath()) && !force) {
+    throw new Error(`wallet already exists at ${walletPath()} (use --force to overwrite)`);
   }
   const account = algosdk.generateAccount();
   writeWalletFile(account);
@@ -79,8 +91,8 @@ export function createWallet(force: boolean): { address: string } {
 }
 
 export function importWallet(mnemonic: string, force: boolean): { address: string } {
-  if (existsSync(config.walletPath) && !force) {
-    throw new Error(`wallet already exists at ${config.walletPath} (use --force to overwrite)`);
+  if (existsSync(walletPath()) && !force) {
+    throw new Error(`wallet already exists at ${walletPath()} (use --force to overwrite)`);
   }
   const account = algosdk.mnemonicToSecretKey(mnemonic.trim()); // throws on bad mnemonic
   writeWalletFile(account);
@@ -107,7 +119,7 @@ export async function getBalances(): Promise<Balances> {
 /** Opt this account into the testnet USDC ASA (0-amount self axfer). Needs ALGO for the fee. */
 export async function optIn(): Promise<{ txid: string }> {
   const asaId = Number(config.usdcAsaId);
-  if (!asaId) throw new Error('LUALAMBDA_USDC_ASA_ID is not set; cannot opt in');
+  if (!asaId) throw new Error(`no USDC ASA for network ${config.network}; cannot opt in`);
   const account = loadAccount();
   const client = algod();
   const suggestedParams = await client.getTransactionParams().do();
