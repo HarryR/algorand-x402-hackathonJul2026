@@ -108,10 +108,18 @@ async function preflight(): Promise<{ payTo: string; payer: string; usdcBefore: 
 }
 
 // --- run the real CLI as a subprocess against the spawned orchestrator -------
-async function runCli(args: string[]): Promise<{ code: number; out: string; err: string }> {
+async function runCli(
+  args: string[],
+  extraEnv: Record<string, string> = {},
+): Promise<{ code: number; out: string; err: string }> {
   const proc = Bun.spawn(['bun', 'run', 'src/cli/main.ts', ...args], {
     cwd: process.cwd(),
-    env: { ...process.env, LUALAMBDA_ORCHESTRATOR_URL: BASE_URL, LUALAMBDA_NETWORK: 'testnet' },
+    env: {
+      ...process.env,
+      LUALAMBDA_ORCHESTRATOR_URL: BASE_URL,
+      LUALAMBDA_NETWORK: 'testnet',
+      ...extraEnv,
+    },
     stdout: 'pipe',
     stderr: 'pipe',
     stdin: 'ignore',
@@ -145,6 +153,33 @@ async function main(): Promise<void> {
   const serverLog: string[] = [];
   let serverOk = false;
 
+  const baseArgs = [
+    'invoke',
+    '--pkg',
+    'examples/hello',
+    '--require',
+    'hello',
+    '--profile',
+    PROFILE,
+  ];
+
+  // --- Check 1: local invoke (--local-test) — prove the VM/package/guest path
+  // for FREE before spending anything. If the VM can't run hello locally, the
+  // paid remote path can't either, so abort here rather than burn USDC. Shares
+  // workDir so the kernel materialized now is reused by the orchestrator below.
+  console.log('\ncheck 1: local invoke (--local-test, no payment) …');
+  const rl = await runCli([...baseArgs, '--local-test', '--arg', 'Algorand'], {
+    LUALAMBDA_WORKDIR: workDir,
+  });
+  const localOut = rl.out + rl.err;
+  const localOk = rl.code === 0 && /"greeting":\s*"hello Algorand"/.test(rl.out);
+  check('local invoke exit 0 + correct result', localOk, localOut.trim());
+  if (!localOk) {
+    console.error('\n✖ local invoke failed — aborting before any payment (no funds spent).');
+    console.error(`  workdir kept: ${workDir}  (boot logs under instances/<id>/boot.log)`);
+    process.exit(1);
+  }
+
   console.log(`\nspawning orchestrator on :${TEST_PORT} (workdir ${workDir}) …`);
   const server = Bun.spawn(['bun', 'run', 'src/orchestrator/server.ts'], {
     cwd: process.cwd(),
@@ -172,18 +207,8 @@ async function main(): Promise<void> {
     }
     console.log('orchestrator healthy.\n');
 
-    const baseArgs = [
-      'invoke',
-      '--pkg',
-      'examples/hello',
-      '--require',
-      'hello',
-      '--profile',
-      PROFILE,
-    ];
-
-    // --- Check 1: a real paid invoke succeeds + settles on-chain ------------
-    console.log('check 1: paid invoke (live facilitator + VM boot) …');
+    // --- Check 2: a real paid invoke succeeds + settles on-chain ------------
+    console.log('check 2: paid invoke (live facilitator + VM boot) …');
     const r1 = await runCli([...baseArgs, '--arg', 'Algorand']);
     const out1 = r1.out + r1.err;
     check('exit 0', r1.code === 0, `exit ${r1.code}\n${out1.trim()}`);
@@ -228,15 +253,15 @@ async function main(): Promise<void> {
       }
     }
 
-    // --- Check 2: re-paying the same id is rejected (409, no double charge) --
-    console.log('\ncheck 2: idempotent re-pay → 409 …');
+    // --- Check 3: re-paying the same id is rejected (409, no double charge) --
+    console.log('\ncheck 3: idempotent re-pay → 409 …');
     const r2 = await runCli([...baseArgs, '--arg', 'Algorand']);
     const out2 = r2.out + r2.err;
     check('exit 1', r2.code === 1, `exit ${r2.code}`);
     check('reports "already paid"', /already paid/i.test(out2), out2.trim());
 
-    // --- Check 3: --max-price aborts before signing (no spend) --------------
-    console.log('\ncheck 3: --max-price below price → client aborts, no spend …');
+    // --- Check 4: --max-price aborts before signing (no spend) --------------
+    console.log('\ncheck 4: --max-price below price → client aborts, no spend …');
     const r3 = await runCli([...baseArgs, '--arg', 'CheapCheck', '--max-price', '0.0001']);
     const out3 = r3.out + r3.err;
     check('exit 1', r3.code === 1, `exit ${r3.code}`);

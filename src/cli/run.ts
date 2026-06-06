@@ -4,6 +4,8 @@
  *
  *   lualambda invoke <id> --pkg ./hello --require hello --arg world --profile small
  *   lualambda invoke --pkg ./hello --require hello --arg world   # id auto-derived
+ *   lualambda invoke < script.lua                                # raw Lua via stdin
+ *   echo 'return 2 + 2' | lualambda invoke                       # quick one-liner
  *   lualambda status <id>
  *   lualambda output <id>
  *   lualambda profiles
@@ -17,12 +19,15 @@
  */
 
 import { parseArgs } from 'node:util';
+import { readFile } from 'node:fs/promises';
+import { basename } from 'node:path';
 import { config } from '@/shared/config.ts';
 import { PROFILES, DEFAULT_PROFILE } from '@/shared/profiles.ts';
 import type { InvokeOutput, InvokeStatus, InvokeDiscovery } from '@/shared/protocol.ts';
 import { deriveId } from '@/shared/idempotency.ts';
+import { assertValidRequire, ValidationError } from '@/shared/validate.ts';
 import { baseUnitsToUsd } from '@/shared/units.ts';
-import { resolvePackage, type PackageZip } from './zip.ts';
+import { resolvePackage, luaModulePackage, type PackageZip } from './zip.ts';
 import { runLocal } from '@/orchestrator/local.ts';
 import { payingFetch, type PayTimings } from './payment.ts';
 import * as wallet from './wallet.ts';
@@ -31,10 +36,14 @@ import { addressQr } from './qr.ts';
 const USAGE = `lualambda — pay-per-run Lua packages on Algorand (x402)
 
 Usage:
-  lualambda invoke [<id>] --pkg <dir|zip> [--pkg <dir|zip> ...] --require <module>
+  lualambda invoke [<id>] [--pkg <dir|zip|file.lua> ...] [--require <module>]
                    [--arg <v> ...] [--profile nano|small|med] [--max-price <usd>]
                    [--local-test [--keep]]
-                   (a directory is zipped in-process; a .zip is uploaded verbatim)
+                   (with no --pkg, reads a Lua script from stdin:
+                      lualambda invoke < script.lua
+                    a directory is zipped in-process; a .zip is uploaded verbatim;
+                    a .lua file or piped Lua runs as the handler. --require defaults
+                    to the module/file name; required only with multiple --pkg.)
                    (--local-test boots the package in a local QEMU VM — no server,
                     no payment, no wallet; needs qemu-system-x86_64 on PATH.
                     --keep retains the instance dir + boot.log for inspection)
@@ -73,17 +82,79 @@ function asArray(v: unknown): string[] {
   return Array.isArray(v) ? v.map(String) : v != null ? [String(v)] : [];
 }
 
-async function cmdInvoke(positionals: string[], values: Record<string, unknown>): Promise<void> {
-  const pkgPaths = asArray(values.pkg);
-  if (pkgPaths.length === 0) die('invoke: need at least one --pkg <dir|zip>\n\n' + USAGE);
-  const requireMod = values.require ? String(values.require) : undefined;
-  if (!requireMod) die('invoke: --require <module> is required\n\n' + USAGE);
+/** Coerce a string into a valid single-segment Lua module name (for synthetic packages). */
+function sanitizeModuleName(name: string): string {
+  const cleaned = name.replace(/[^A-Za-z0-9_]/g, '_');
+  if (!cleaned) return 'main';
+  return /^[A-Za-z_]/.test(cleaned) ? cleaned : `_${cleaned}`; // require segments can't lead with a digit
+}
 
+/**
+ * Resolve the package set + module to `require` from the flags. Supports raw Lua
+ * so simple cases need no packaging:
+ *   - no --pkg            → read a Lua chunk from stdin (must be piped)
+ *   - --pkg <file.lua>    → that file is the Lua chunk
+ *   - --pkg <dir|zip> ... → packaged mode (existing behavior)
+ * Raw chunks are wrapped into a synthetic single-module package (luaModulePackage,
+ * which makes bare scripts, value-returners, and full `function(args)` modules all
+ * work). `--require` defaults to the synthetic module name in raw mode, or the
+ * single package's basename in packaged mode; it's required only with multiple --pkg.
+ */
+async function resolveInvokeInputs(
+  values: Record<string, unknown>,
+): Promise<{ pkgs: PackageZip[]; requireMod: string }> {
+  const pkgPaths = asArray(values.pkg);
+  const luaFile =
+    pkgPaths.length === 1 && pkgPaths[0]!.toLowerCase().endsWith('.lua') ? pkgPaths[0]! : undefined;
+
+  // Raw Lua mode: source from a single .lua file, else piped stdin.
+  if (pkgPaths.length === 0 || luaFile) {
+    let source: string;
+    let defaultMod: string;
+    if (luaFile) {
+      source = await readFile(luaFile, 'utf8').catch(() => die(`invoke: cannot read ${luaFile}`));
+      defaultMod = sanitizeModuleName(basename(luaFile).replace(/\.lua$/i, ''));
+    } else {
+      if (process.stdin.isTTY) {
+        die(
+          'invoke: no --pkg given and stdin is a terminal.\n' +
+            'Pipe a Lua script: lualambda invoke < script.lua   (or pass --pkg <dir|zip>)',
+        );
+      }
+      source = await Bun.stdin.text();
+      defaultMod = 'main';
+    }
+    if (!source.trim()) die('invoke: empty Lua source');
+    const requireMod = values.require ? sanitizeModuleName(String(values.require)) : defaultMod;
+    return { pkgs: [luaModulePackage(source, requireMod)], requireMod };
+  }
+
+  // Packaged mode.
+  const pkgs = await Promise.all(pkgPaths.map((p) => resolvePackage(p)));
+  if (values.require) return { pkgs, requireMod: String(values.require) };
+  if (pkgs.length !== 1) {
+    die('invoke: --require <module> is required when multiple --pkg are given\n\n' + USAGE);
+  }
+  // Infer require from the single package's basename — but only if it's a valid
+  // Lua module name (stems allow dashes that `require` does not).
+  const candidate = pkgs[0]!.name.replace(/\.zip$/i, '');
+  try {
+    assertValidRequire(candidate);
+  } catch (e) {
+    if (e instanceof ValidationError) {
+      die(`invoke: couldn't infer --require from "${pkgs[0]!.name}" — pass --require <module>`);
+    }
+    throw e;
+  }
+  return { pkgs, requireMod: candidate };
+}
+
+async function cmdInvoke(positionals: string[], values: Record<string, unknown>): Promise<void> {
   const args = asArray(values.arg);
   const profile = String(values.profile ?? DEFAULT_PROFILE);
   const maxPrice = values['max-price'] ? Number(values['max-price']) : undefined;
 
-  const pkgs = await Promise.all(pkgPaths.map((p) => resolvePackage(p)));
+  const { pkgs, requireMod } = await resolveInvokeInputs(values);
 
   // Local dry-run: boot the package in a local QEMU VM via the shared core, no
   // server/payment. A faithful preview of a real invoke (same id/store/launch).

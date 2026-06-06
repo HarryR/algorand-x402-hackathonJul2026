@@ -24,6 +24,49 @@ export interface PackageZip {
   bytes: Uint8Array;
 }
 
+/**
+ * Wrap a raw Lua chunk so it satisfies the handler contract the stager expects
+ * (`return function(args) ... end` — see src/orchestrator/stager.ts). The chunk
+ * runs as a function body with `args` (the positional array) in scope and `...`
+ * set to the unpacked args, so all of these "just work":
+ *   - `return 2 + 2`                                  → 4
+ *   - `return { greeting = 'hi ' .. (args[1] or '') }`→ table
+ *   - a full module: `return function(a) ... end`     → called with args
+ *   - bare statements (`print('hi')`)                 → null result
+ * The source is embedded as a file entry (not interpolated into a Lua string), so
+ * it needs no escaping and must NOT be re-indented (long `[[...]]` strings would
+ * break). The function-detect lets module-style chunks pass through unchanged.
+ */
+export function wrapLuaHandler(source: string): string {
+  return [
+    'return function(args)',
+    '  args = args or {}',
+    '  local handler = function(...)',
+    source,
+    '  end',
+    '  local unpack = table.unpack or unpack',
+    '  local r = handler(unpack(args))',
+    '  if type(r) == "function" then return r(args) end',
+    '  return r',
+    'end',
+    '',
+  ].join('\n');
+}
+
+/**
+ * Build a synthetic single-module package from a raw Lua chunk: a STORED zip
+ * `<module>.zip` holding `<module>/init.lua` (the wrapped source), so the guest
+ * loader resolves `require('<module>')` to it. Used by `invoke` when there's no
+ * `--pkg` (piped Lua) or a bare `.lua` file is given.
+ */
+export function luaModulePackage(source: string, moduleName = 'main'): PackageZip {
+  const wrapped = wrapLuaHandler(source);
+  const entries: ZipEntry[] = [
+    { path: `${moduleName}/init.lua`, data: new TextEncoder().encode(wrapped) },
+  ];
+  return { name: `${moduleName}.zip`, bytes: writeStoredZip(entries) };
+}
+
 /** Recursively collect files under `dir`, returning archive paths + bytes. */
 async function collect(dir: string, prefix: string): Promise<ZipEntry[]> {
   const out: ZipEntry[] = [];

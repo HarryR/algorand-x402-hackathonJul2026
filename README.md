@@ -51,6 +51,14 @@ bun run cli -- invoke --pkg ./examples/hello --require hello --arg Algorand --pr
 # --pkg accepts a directory (zipped in-process) or an existing .zip (uploaded verbatim)
 bun run cli -- status <id>
 bun run cli -- output <id>
+
+# Raw Lua — no packaging needed. With no --pkg, a Lua script is read from stdin
+# (or pass a single .lua file); --require defaults to the module/file name.
+echo 'return 2 + 2' | bun run cli -- invoke
+bun run cli -- invoke < script.lua
+bun run cli -- invoke --pkg ./hello.lua --arg world
+# A bare script, a value-returner, or a full `return function(args) ... end`
+# module all work; whatever you return is the JSON output.
 ```
 
 ## Paid invoke on Algorand testnet
@@ -89,8 +97,9 @@ QEMU, the network, and funds); run it on demand:
 ```
 
 It hard-refuses anything but testnet, reads the wallet **read-only** (never
-writes it), and runs the orchestrator in a throwaway workdir. Checks: a paid
-invoke settles (real txid), re-paying the same id returns `409`, and
+writes it), and runs the orchestrator in a throwaway workdir. Checks: a local
+invoke boots the VM for free first (so a broken VM fails before any spend), then
+a paid invoke settles (real txid), re-paying the same id returns `409`, and
 `--max-price` below the price aborts before signing. `payTo` defaults to the
 project receiver; override with `LUALAMBDA_PAY_TO`.
 
