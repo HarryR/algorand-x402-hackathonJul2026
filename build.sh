@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# Build the lualambda binaries (CLI + orchestrator) into build/<target>/.
+# Build the single all-in-one lualambda binary into build/<target>/.
+#
+# One executable is client, wallet, AND orchestrator — the role is chosen at
+# runtime by the first argument (`lualambda serve` boots the HTTP orchestrator;
+# everything else is a CLI command). Shipping one file means the Bun runtime +
+# embedded MicroNT artifacts (vmlinux + initrd) are bundled once, not twice.
 #
 # Defaults to Linux x86_64. Pass a target to build for another platform:
 #
@@ -13,12 +18,11 @@
 # multiple targets coexist (e.g. for release capture / CI artifacts):
 #
 #   build/linux-x64/lualambda
-#   build/linux-x64/lualambda-orchestrator
 #   build/windows-x64/lualambda.exe
 #
-# Note: the orchestrator is designed to run on our Linux server (it spawns QEMU),
-# so Linux is the target that matters in practice — the others are here so you
-# can expand to mac/windows builds later without touching this script.
+# Note: the orchestrator role spawns QEMU, so Linux is the target that matters in
+# practice — the others are here so you can expand to mac/windows builds later
+# without touching this script (the client/wallet roles work everywhere).
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -33,15 +37,9 @@ FLAGS=(--compile --minify --bytecode "--target=bun-${TARGET}")
 ext=""
 [[ "$TARGET" == windows-* ]] && ext=".exe"
 
-build() {
-  local entry="$1" name="$2"
-  local outfile="${OUT}/${name}${ext}"
-  echo "==> ${name} (${TARGET}) -> ${outfile}"
-  bun build "${FLAGS[@]}" "$entry" --outfile "$outfile"
-}
+outfile="${OUT}/lualambda${ext}"
+echo "==> lualambda (${TARGET}) -> ${outfile}"
+bun build "${FLAGS[@]}" ./src/cli/main.ts --outfile "$outfile"
 
-build ./src/cli/main.ts lualambda
-build ./src/orchestrator/server.ts lualambda-orchestrator
-
-echo "==> done; binaries in ${OUT}/"
+echo "==> done; binary in ${OUT}/"
 ls -lh "${OUT}/"

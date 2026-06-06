@@ -48,6 +48,7 @@ Usage:
                     no payment, no wallet; needs qemu-system-x86_64 on PATH.
                     --keep retains the instance dir + boot.log for inspection;
                     --console streams the guest serial console live to stderr)
+  lualambda serve [--port <n>] [--pay-to <addr>]   # run the orchestrator (HTTP API)
   lualambda status <id>
   lualambda output <id>
   lualambda profiles
@@ -242,9 +243,7 @@ async function cmdInvokeLocal(
 ): Promise<void> {
   // --console streams the guest serial console live to stderr as it boots, so a
   // failing/hanging boot is visible without digging into boot.log afterwards.
-  const onSerial = opts.console
-    ? (chunk: Uint8Array) => process.stderr.write(chunk)
-    : undefined;
+  const onSerial = opts.console ? (chunk: Uint8Array) => process.stderr.write(chunk) : undefined;
 
   const res = await runLocal({
     packages: pkgs.map((p) => ({ name: p.name, bytes: p.bytes })),

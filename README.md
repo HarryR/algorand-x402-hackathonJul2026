@@ -127,7 +127,7 @@ port gets nothing and can't poison it.
 
 ```
 src/
-  cli/           lualambda CLI (cross-compiles to a single binary)
+  cli/           entry shim (main.ts: role dispatch) + CLI/wallet (run.ts)
   orchestrator/  HTTP API, store, QEMU launcher (vm.ts), instance prep,
                  connect-back record protocol, host-sent stager, ports
   guest/         overlay/ merged into the upstream initrd (port-fix agent);
@@ -135,15 +135,33 @@ src/
   shared/        wire contracts, profiles, config, zip read/write,
                  fat16 + mbr + drive (pure-TS FAT16 disk builder)
 examples/hello/  sample package (zips to hello.zip, required as `hello`)
-build.sh         build both binaries into build/<target>/ (default linux-x64)
+build.sh         build the single binary into build/<target>/ (default linux-x64)
 .github/         CI: full build; release tags (v*) publish binaries
 ```
 
-## Build binaries
+## One binary, three roles
 
-`build.sh` compiles both binaries (the `lualambda` CLI and the
-`lualambda-orchestrator`) into `build/<target>/` (gitignored). Defaults to Linux
-x86_64; pass a Bun target to build for another platform.
+A single executable is the **client**, the **wallet**, and the **orchestrator** —
+the role is chosen by the first argument:
+
+```bash
+lualambda serve [--port <n>] [--pay-to <addr>]   # run the orchestrator (HTTP API)
+lualambda invoke …                               # client (pays + drives an invoke)
+lualambda invoke … --local-test                  # boot the VM locally, no server
+lualambda wallet …                               # wallet
+```
+
+Everything ships in the one file — the Bun runtime and the embedded MicroNT
+artifacts (`vmlinux` + `initrd`) are bundled once, so the download is a single
+~100 MB binary rather than two. `serve` reads its config from the environment
+(`LUALAMBDA_PORT`, `LUALAMBDA_PAY_TO`, `LUALAMBDA_WORKDIR`, `LUALAMBDA_NETWORK`);
+`--port`/`--pay-to` are convenience flags for the two most common knobs.
+
+## Build the binary
+
+`build.sh` compiles the single `lualambda` binary into `build/<target>/`
+(gitignored). Defaults to Linux x86_64; pass a Bun target to build for another
+platform.
 
 ```bash
 ./build.sh                 # build/linux-x64/
@@ -155,4 +173,4 @@ x86_64; pass a Bun target to build for another platform.
 
 CI ([.github/workflows/build.yml](.github/workflows/build.yml)) runs typecheck +
 lint + tests + build on every push/PR. Pushing a `v*` tag additionally publishes
-a GitHub Release with the binaries attached (one tarball per target).
+a GitHub Release with the binary attached (one tarball per target).

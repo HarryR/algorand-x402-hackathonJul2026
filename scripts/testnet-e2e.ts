@@ -181,7 +181,9 @@ async function main(): Promise<void> {
   }
 
   console.log(`\nspawning orchestrator on :${TEST_PORT} (workdir ${workDir}) …`);
-  const server = Bun.spawn(['bun', 'run', 'src/orchestrator/server.ts'], {
+  // Boot via the unified entry's `serve` role, same as the shipped binary — so the
+  // e2e exercises the real CLI dispatch path, not the server module directly.
+  const server = Bun.spawn(['bun', 'run', 'src/cli/main.ts', 'serve'], {
     cwd: process.cwd(),
     env: {
       ...process.env,

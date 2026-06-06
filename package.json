@@ -9,7 +9,7 @@
     "lualambda": "src/cli/main.ts"
   },
   "scripts": {
-    "dev": "bun run src/orchestrator/server.ts",
+    "dev": "bun run src/cli/main.ts serve",
     "cli": "bun run src/cli/main.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",

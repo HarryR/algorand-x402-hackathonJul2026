@@ -1,12 +1,15 @@
 #!/usr/bin/env bun
 /**
- * lualambda CLI entry shim.
+ * lualambda entry shim — the single all-in-one binary.
  *
- * `--network testnet|mainnet` selects the Algorand network bundle (CAIP-2 + USDC
- * ASA + endpoints). config.ts reads LUALAMBDA_NETWORK at import time, so we must
- * resolve the flag and set the env var BEFORE importing config (or anything that
- * imports it). Hence this shim: pre-parse argv, set the env, then dynamically
- * import the real CLI. The implementation lives in ./run.ts.
+ * One executable is client, wallet, AND orchestrator. The first positional picks
+ * the role: `serve` (aka `orchestrator`) boots the HTTP server; everything else is
+ * a CLI command (invoke/status/wallet/…) handled by ./run.ts.
+ *
+ * Both roles import config.ts, which reads its env (LUALAMBDA_NETWORK, _WORKDIR,
+ * _PORT, _PAY_TO) AT IMPORT TIME — so this shim must pre-parse the relevant flags
+ * and set the env BEFORE dynamically importing either role. Hence the shim: parse
+ * globals, set env, then import the chosen entrypoint.
  */
 
 function die(msg: string): never {
@@ -40,7 +43,36 @@ if (network !== undefined) {
 const workdir = flag('workdir');
 if (workdir) process.env.LUALAMBDA_WORKDIR = workdir;
 
-// Import AFTER the env is set so config picks up the selected network.
-import('./run.ts')
-  .then((m) => m.run())
-  .catch((e) => die(e instanceof Error ? e.message : String(e)));
+// First positional = the role/command. Global flags (--network/--workdir, and the
+// serve-only --port/--pay-to) may precede it, so skip flags and their values.
+function firstPositional(args: string[]): string | undefined {
+  const valueFlags = new Set(['--network', '--workdir', '--port', '--pay-to']);
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (valueFlags.has(a)) {
+      i++; // skip the flag's value too
+      continue;
+    }
+    if (a.startsWith('-')) continue; // --x=y form or a bare boolean flag
+    return a;
+  }
+  return undefined;
+}
+
+const command = firstPositional(argv);
+
+// Import AFTER the env is set so config picks up the selected network/role config.
+if (command === 'serve' || command === 'orchestrator') {
+  // Orchestrator role. It reads its config (port, payTo, …) from env and starts
+  // Bun.serve at module top level, so importing it boots the server. Surface the
+  // two most common knobs as flags for convenience.
+  const port = flag('port');
+  if (port) process.env.LUALAMBDA_PORT = port;
+  const payTo = flag('pay-to');
+  if (payTo) process.env.LUALAMBDA_PAY_TO = payTo;
+  import('../orchestrator/server.ts').catch((e) => die(e instanceof Error ? e.message : String(e)));
+} else {
+  import('./run.ts')
+    .then((m) => m.run())
+    .catch((e) => die(e instanceof Error ? e.message : String(e)));
+}
