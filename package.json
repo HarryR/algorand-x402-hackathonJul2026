@@ -1,6 +1,6 @@
 {
   "name": "lualambda",
-  "version": "0.0.0",
+  "version": "7.0.0",
   "private": true,
   "description": "x402-powered Lua lambda functions, settled on Algorand — runs untrusted code in MicroNT QEMU microVMs, charges per invocation over x402.",
   "type": "module",

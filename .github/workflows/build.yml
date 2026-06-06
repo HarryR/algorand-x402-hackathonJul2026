@@ -1,20 +1,22 @@
 name: build
 
 # Full build on every push/PR. On a release tag (v*), additionally capture the
-# binaries and publish them as GitHub Release assets (one tarball per target).
+# binary and publish it as a GitHub Release asset (one tarball per target), with
+# a signed build-provenance attestation.
 on:
   push:
     branches: ['**']
     tags: ['v*']
   pull_request:
 
+# Least privilege by default; the release job widens its own grant below.
 permissions:
-  contents: write # required for the release job to create/update a Release
+  contents: read
 
 jobs:
   # ---------------------------------------------------------------------------
   # Verify + build. Runs for every push and PR. Builds linux-x64 to prove the
-  # binaries compile; the release job rebuilds per target with the same matrix.
+  # binary compiles; the release job rebuilds per target with the same matrix.
   # ---------------------------------------------------------------------------
   ci:
     runs-on: ubuntu-latest
@@ -57,6 +59,10 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: ci
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # create/update the GitHub Release + attach assets
+      id-token: write # OIDC signing for build provenance attestation
+      attestations: write # upload the provenance attestation
     strategy:
       matrix:
         target:
@@ -80,6 +86,14 @@ jobs:
       - name: Build (${{ matrix.target }})
         run: ./build.sh ${{ matrix.target }}
 
+      # Signed build provenance for the binary itself — verifiable with
+      # `gh attestation verify lualambda --repo <owner>/<repo>` after extraction.
+      # (windows targets emit lualambda.exe; adjust subject-path when enabled.)
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: build/${{ matrix.target }}/lualambda
+
       - name: Package tarball
         run: tar -czf "lualambda-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" -C "build/${{ matrix.target }}" .
 
@@ -87,3 +101,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: lualambda-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          generate_release_notes: true
