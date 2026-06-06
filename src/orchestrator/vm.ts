@@ -214,7 +214,12 @@ export async function launch(req: LaunchRequest): Promise<LaunchResult> {
     });
 
     const output = await Promise.race([runProtocol(port, stager), timeout]);
-    return { output, vmWallMs: Date.now() - startedAt, instanceDir: instance.dir, cleanup: instance.cleanup };
+    return {
+      output,
+      vmWallMs: Date.now() - startedAt,
+      instanceDir: instance.dir,
+      cleanup: instance.cleanup,
+    };
   } catch (e) {
     if (e instanceof TimeoutError) {
       return {

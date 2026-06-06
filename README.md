@@ -76,6 +76,24 @@ bun run cli -- invoke --pkg ./examples/hello --require hello --arg Algorand --pr
 #      settled: <txid>   https://lora.algokit.io/testnet/tx/<txid>
 ```
 
+### Automated testnet check
+
+[scripts/testnet-e2e.ts](scripts/testnet-e2e.ts) runs the whole loop end-to-end
+against the live facilitator and a real VM, then asserts on it — a repeatable
+version of the runbook above. It is **not** part of `bun test` / CI (it needs
+QEMU, the network, and funds); run it on demand:
+
+```bash
+./e2e-test.sh <receiver>                          # ~$0.001 USDC for one nano invoke
+# or: LUALAMBDA_PAY_TO=<receiver> bun run testnet:e2e
+```
+
+It hard-refuses anything but testnet, reads the wallet **read-only** (never
+writes it), and runs the orchestrator in a throwaway workdir. Checks: a paid
+invoke settles (real txid), re-paying the same id returns `409`, and
+`--max-price` below the price aborts before signing. `payTo` defaults to the
+project receiver; override with `LUALAMBDA_PAY_TO`.
+
 Notes: the facilitator **fee-sponsors** the payment group, so neither the payer
 nor the orchestrator needs ALGO for the transfer (only a little for the one-time
 opt-in). Payments are enforced only when `LUALAMBDA_PAY_TO` is set; otherwise the

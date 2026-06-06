@@ -24,7 +24,7 @@ import { deriveId } from '@/shared/idempotency.ts';
 import { baseUnitsToUsd } from '@/shared/units.ts';
 import { resolvePackage, type PackageZip } from './zip.ts';
 import { runLocal } from '@/orchestrator/local.ts';
-import { payingFetch } from './payment.ts';
+import { payingFetch, type PayTimings } from './payment.ts';
 import * as wallet from './wallet.ts';
 import { addressQr } from './qr.ts';
 
@@ -108,7 +108,8 @@ async function cmdInvoke(positionals: string[], values: Record<string, unknown>)
   }
   form.set('spec', JSON.stringify({ require: requireMod, args }));
 
-  const doFetch = payingFetch(maxPrice);
+  const timings: Partial<PayTimings> = {};
+  const doFetch = payingFetch(maxPrice, timings);
   let res: Response;
   try {
     res = await doFetch(`${config.orchestratorUrl}/invoke/${encodeURIComponent(id)}/${profile}`, {
@@ -133,7 +134,20 @@ async function cmdInvoke(positionals: string[], values: Record<string, unknown>)
   console.log(`id: ${id}`);
   console.log(JSON.stringify(out.result, null, 2));
   if (out.receipt) console.log(`\nsettled: ${out.receipt.txid}\n${out.receipt.explorerUrl}`);
-  console.log(`\n(${out.metering.profile}, ${out.metering.vmWallMs}ms)`);
+
+  const m = out.metering;
+  if (timings.paidMs !== undefined) {
+    // Paid path: report the x402-payment→VM-response e2e latency (the key
+    // serverless metric) with the server-side settle vs. VM breakdown.
+    const settle = m.settleMs !== undefined ? `settle ${Math.round(m.settleMs)}ms · ` : '';
+    console.log(
+      `\ne2e: ${Math.round(timings.paidMs)}ms payment→response  ` +
+        `(${settle}vm ${m.vmWallMs}ms)  profile=${m.profile}`,
+    );
+  } else {
+    // Free path (no 402): just the VM wall-clock.
+    console.log(`\n(${m.profile}, ${m.vmWallMs}ms)`);
+  }
 }
 
 /**

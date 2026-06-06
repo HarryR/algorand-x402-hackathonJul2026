@@ -132,9 +132,15 @@ export interface SettlementReceipt {
 }
 
 export interface Metering {
-  /** Wall-clock the guest VM was alive, ms. */
+  /** Wall-clock the guest VM was alive (boot + run), ms. */
   vmWallMs: number;
   profile: ProfileName;
+  /**
+   * Server-side facilitator verify+settle duration, ms. Present only on the paid
+   * path (omitted when payments are disabled). Lets a client see how much of the
+   * payment→response latency was settlement vs. compute.
+   */
+  settleMs?: number;
 }
 
 // --- Guest contract ---------------------------------------------------------

@@ -181,11 +181,14 @@ async function handlePay(req: Request, id: string, profileName: string): Promise
   // is already consumed above). No-op when payments are disabled.
   let receipt: SettlementReceipt | undefined;
   let paymentResponseHeader: string | undefined;
+  let settleMs: number | undefined;
   if (paymentsRequired()) {
+    const settleStart = Date.now();
     try {
       const settled = await settle(req, profile);
       receipt = settled.receipt;
       paymentResponseHeader = settled.responseHeader;
+      settleMs = Date.now() - settleStart;
     } catch (e) {
       return challenge(
         profile,
@@ -216,7 +219,7 @@ async function handlePay(req: Request, id: string, profileName: string): Promise
       profile,
     });
     inv.expiresAtMs = Date.now() + profile.retainSeconds * 1000;
-    inv.metering = { vmWallMs, profile: profile.name };
+    inv.metering = { vmWallMs, profile: profile.name, settleMs };
     if (output.ok) {
       inv.state = 'done';
       inv.result = output.result;

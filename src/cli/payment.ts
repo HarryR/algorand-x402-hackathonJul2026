@@ -46,10 +46,29 @@ export function selectRequirement(
 export type PayingFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 /**
- * Build an x402-paying fetch. `maxPriceUsd` (from `--max-price`) caps what the
- * client will sign; selection/abort happens before any signing.
+ * Latency breakdown of a paid request, filled in by `payingFetch` when a 402 is
+ * encountered (all ms). Left empty if the resource returns without a 402.
  */
-export function payingFetch(maxPriceUsd?: number): PayingFetch {
+export interface PayTimings {
+  /** First request sent → 402 challenge received. */
+  challengeMs: number;
+  /** Building + signing the Algorand USDC payment payload (local crypto). */
+  signMs: number;
+  /**
+   * Paid request sent (carrying PAYMENT-SIGNATURE) → response received. This is
+   * the x402-payment→VM-response end-to-end segment — the key serverless metric:
+   * it spans facilitator settle + VM boot/run + the round trips around them.
+   */
+  paidMs: number;
+}
+
+/**
+ * Build an x402-paying fetch. `maxPriceUsd` (from `--max-price`) caps what the
+ * client will sign; selection/abort happens before any signing. If `timings` is
+ * passed, the per-phase latencies are written into it (see PayTimings) — used to
+ * report the payment→response e2e time.
+ */
+export function payingFetch(maxPriceUsd?: number, timings?: Partial<PayTimings>): PayingFetch {
   const ceiling = maxPriceUsd === undefined ? undefined : parseUsdToBaseUnits(maxPriceUsd);
   const signer = toClientAvmSigner(signerKeyBase64());
 
@@ -58,8 +77,10 @@ export function payingFetch(maxPriceUsd?: number): PayingFetch {
   const http = new x402HTTPClient(core);
 
   return async (input, init) => {
+    const t0 = performance.now();
     const res = await fetch(input, init);
     if (res.status !== 402) return res;
+    if (timings) timings.challengeMs = performance.now() - t0;
 
     // Parse requirements, create + sign the payment, retry once with the header.
     const paymentRequired = http.getPaymentRequiredResponse(
@@ -69,10 +90,16 @@ export function payingFetch(maxPriceUsd?: number): PayingFetch {
         .json()
         .catch(() => undefined),
     );
+    const tSign = performance.now();
     const payload = await http.createPaymentPayload(paymentRequired); // may throw (max-price abort)
     const payHeaders = http.encodePaymentSignatureHeader(payload);
+    if (timings) timings.signMs = performance.now() - tSign;
+
     const headers = new Headers(init?.headers);
     for (const [k, v] of Object.entries(payHeaders)) headers.set(k, v);
-    return fetch(input, { ...init, headers });
+    const tPaid = performance.now();
+    const paid = await fetch(input, { ...init, headers });
+    if (timings) timings.paidMs = performance.now() - tPaid;
+    return paid;
   };
 }

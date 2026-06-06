@@ -16,7 +16,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",
-    "build": "bash build.sh"
+    "build": "bash build.sh",
+    "testnet:e2e": "bun run scripts/testnet-e2e.ts"
   },
   "devDependencies": {
     "@eslint/js": "^9",
