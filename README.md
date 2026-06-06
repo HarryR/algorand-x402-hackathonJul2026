@@ -60,19 +60,24 @@ src/
   guest/         MicroNT init.lua shim (the in-VM runtime)
   shared/        wire contracts, resource profiles, config
 examples/hello/  sample package (zips to hello.zip, required as `hello`)
-build.sh         build both binaries into build/ (default linux-x64)
+build.sh         build both binaries into build/<target>/ (default linux-x64)
+.github/         CI: full build; release tags (v*) publish binaries
 ```
 
 ## Build binaries
 
 `build.sh` compiles both binaries (the `lualambda` CLI and the
-`lualambda-orchestrator`) into `build/` (gitignored). Defaults to Linux x86_64;
-pass a target to build for another platform.
+`lualambda-orchestrator`) into `build/<target>/` (gitignored). Defaults to Linux
+x86_64; pass a Bun target to build for another platform.
 
 ```bash
-./build.sh                 # linux-x64 (default)
-./build.sh linux-arm64
-./build.sh darwin-arm64    # (expand to mac/windows later)
-./build.sh windows-x64
+./build.sh                 # build/linux-x64/
+./build.sh linux-arm64     # build/linux-arm64/
+./build.sh darwin-arm64    # build/darwin-arm64/   (expand to mac/windows later)
+./build.sh windows-x64     # build/windows-x64/    (.exe suffix added)
 # or: bun run build
 ```
+
+CI ([.github/workflows/build.yml](.github/workflows/build.yml)) runs typecheck +
+lint + tests + build on every push/PR. Pushing a `v*` tag additionally publishes
+a GitHub Release with the binaries attached (one tarball per target).

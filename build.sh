@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the lualambda binaries (CLI + orchestrator) into build/.
+# Build the lualambda binaries (CLI + orchestrator) into build/<target>/.
 #
 # Defaults to Linux x86_64. Pass a target to build for another platform:
 #
@@ -8,9 +8,13 @@
 #   ./build.sh darwin-arm64
 #   ./build.sh windows-x64
 #
-# Targets map to Bun --target values (the "bun-" prefix is added for you). See
-# `bun build --help` for the full list. Both binaries are built for the same
-# target; on Windows the orchestrator/CLI get a .exe suffix automatically.
+# Targets are Bun --target suffixes (the "bun-" prefix is added for you); see
+# `bun build --help` for the full list. Output goes to a per-target directory so
+# multiple targets coexist (e.g. for release capture / CI artifacts):
+#
+#   build/linux-x64/lualambda
+#   build/linux-x64/lualambda-orchestrator
+#   build/windows-x64/lualambda.exe
 #
 # Note: the orchestrator is designed to run on our Linux server (it spawns QEMU),
 # so Linux is the target that matters in practice — the others are here so you
@@ -20,7 +24,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 TARGET="${1:-linux-x64}"
-OUT="build"
+OUT="build/${TARGET}"
 mkdir -p "$OUT"
 
 # Common flags: --minify (smaller) --bytecode (faster startup).
