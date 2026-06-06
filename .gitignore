@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Build output (Bun compiled binaries, etc.)
+build/
+dist/
+*.tsbuildinfo
+
+# Bun
+.bun/
+
+# Secrets — NEVER commit keys. Testnet or not.
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+wallet.json
+mnemonic.txt
+secrets/
+
+# Orchestrator runtime data (deployed bundles, metadata)
+.lualambda/
+
+# QEMU / VM artifacts
+*.img
+*.qcow2
+initrd.zip
+*.log
+
+# OS / editor cruft
+.DS_Store
+
+# Claude Code local (personal) settings — shared config goes in settings.json
+.claude/settings.local.json

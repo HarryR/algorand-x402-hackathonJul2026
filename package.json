@@ -1,0 +1,30 @@
+{
+  "name": "lualambda",
+  "version": "0.0.0",
+  "private": true,
+  "description": "x402-powered Lua lambda functions, settled on Algorand — runs untrusted code in MicroNT QEMU microVMs, charges per invocation over x402.",
+  "type": "module",
+  "module": "src/cli/main.ts",
+  "bin": {
+    "lualambda": "src/cli/main.ts"
+  },
+  "scripts": {
+    "dev": "bun run src/orchestrator/server.ts",
+    "cli": "bun run src/cli/main.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint .",
+    "build": "bash build.sh"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9",
+    "@types/bun": "latest",
+    "eslint": "^9",
+    "prettier": "^3",
+    "typescript": "^5",
+    "typescript-eslint": "^8"
+  },
+  "trustedDependencies": []
+}

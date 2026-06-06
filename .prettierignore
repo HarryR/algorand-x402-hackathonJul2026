@@ -1,0 +1,10 @@
+node_modules
+dist
+bun.lock
+bun.lockb
+*.log
+
+# Authored by hand / not ours to reformat.
+OUTLINE.md
+.claude/
+.devcontainer/devcontainer.json

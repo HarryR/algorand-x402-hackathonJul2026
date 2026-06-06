@@ -1,0 +1,46 @@
+{
+  "name": "lualambda-dev",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+
+  // Run as the non-root `bun` user from the image (supply-chain isolation).
+  "remoteUser": "bun",
+
+  // Workspace mount. Host secrets are intentionally NOT mounted in — keep
+  // ~/.ssh, cloud creds, and Algorand MAINNET keys on the host only.
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+
+  // QEMU runs INSIDE the container in TCG mode for development — no /dev/kvm
+  // passthrough, no extra privileges. The packaged orchestrator auto-detects
+  // KVM at runtime; in dev we accept slower TCG emulation for reproducibility.
+  //
+  // If you later want KVM speed in-container, add (host must have /dev/kvm):
+  //   "runArgs": ["--device=/dev/kvm"]
+  // and ensure the `bun` user is in the kvm group. Left off by design for now.
+
+  // Open network by default — the container boundary is the trust line.
+  // (No egress allowlist here; that's a documented future hardening step.)
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "oven.bun-vscode",
+        "esbenp.prettier-vscode",
+        "dbaeumer.vscode-eslint"
+      ],
+      "settings": {
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "esbenp.prettier-vscode"
+      }
+    }
+  },
+
+  // Install JS deps on create. Runs only when a package.json exists yet, so
+  // it's a no-op on the empty repo and "just works" once we scaffold the app.
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+
+  // Sanity banner each time you attach.
+  "postAttachCommand": "bash .devcontainer/post-attach.sh"
+}
