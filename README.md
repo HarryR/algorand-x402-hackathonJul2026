@@ -9,9 +9,11 @@ See [OUTLINE.md](./OUTLINE.md) for the full design, rationale, and build plan.
 
 ## Status
 
-Scaffold + Milestone 1 skeleton. The VM launcher ([src/orchestrator/vm.ts](src/orchestrator/vm.ts))
-is a stub pending the Milestone 0 QEMU spike; x402 payment is a Milestone 2
-swap-in at the `payingFetch` seam in [src/cli/main.ts](src/cli/main.ts).
+**Working end-to-end on Algorand testnet.** A paid `invoke` has run for real: the
+CLI signs a USDC payment on the 402, the orchestrator verifies+settles via the
+GoPlausible facilitator (fee-sponsored), then boots a MicroNT microVM and returns
+the result + an on-chain settlement receipt. Milestones 0–2 are done; the
+vmlinux + initrd are embedded in the compiled binary (no host artifacts needed).
 
 ## Model
 
@@ -50,6 +52,37 @@ bun run cli -- invoke --pkg ./examples/hello --require hello --arg Algorand --pr
 bun run cli -- status <id>
 bun run cli -- output <id>
 ```
+
+## Paid invoke on Algorand testnet
+
+The free path above runs with payments off. To exercise the real x402 loop:
+
+```bash
+# 1. Client wallet (the payer). Prints address + a QR for funding from a phone.
+bun run cli -- wallet create
+bun run cli -- wallet opt-in          # opt the payer into testnet USDC (ASA 10458941)
+#    fund it: ALGO https://lora.algokit.io/testnet/fund  ·  USDC https://faucet.circle.com/
+bun run cli -- wallet status          # confirm ALGO + USDC balances
+
+# 2. The receiver (payTo) must ALSO be opted into USDC to receive it. Use a wallet
+#    you control; opt it in once (e.g. via Pera, or `wallet opt-in` from it).
+
+# 3. Run the orchestrator with payments enforced (payTo = the receiver address):
+LUALAMBDA_PAY_TO=<your-receiver-address> bun run dev
+
+# 4. Pay-per-run: 402 -> sign USDC -> settle -> VM -> result + receipt.
+bun run cli -- invoke --pkg ./examples/hello --require hello --arg Algorand --profile nano
+#   -> { "greeting": "hello Algorand" }
+#      settled: <txid>   https://lora.algokit.io/testnet/tx/<txid>
+```
+
+Notes: the facilitator **fee-sponsors** the payment group, so neither the payer
+nor the orchestrator needs ALGO for the transfer (only a little for the one-time
+opt-in). Payments are enforced only when `LUALAMBDA_PAY_TO` is set; otherwise the
+orchestrator runs free. `--network testnet|mainnet` (default testnet) selects the
+USDC ASA + CAIP-2 bundle. Re-invoking the same inputs returns `409` (no double
+charge). The payer key lives at `~/.config/lualambda/wallet.json` (or
+`LUALAMBDA_MNEMONIC`); testnet throwaway keys only.
 
 ## Layout
 

@@ -21,10 +21,18 @@
   "devDependencies": {
     "@eslint/js": "^9",
     "@types/bun": "latest",
+    "@types/qrcode": "^1.5.6",
     "eslint": "^9",
     "prettier": "^3",
     "typescript": "^5",
     "typescript-eslint": "^8"
   },
-  "trustedDependencies": []
+  "trustedDependencies": [],
+  "dependencies": {
+    "@x402-avm/avm": "^2.6.1",
+    "@x402-avm/core": "^2.6.1",
+    "@x402/core": "^2.14.0",
+    "algosdk": "^3.5.2",
+    "qrcode": "^1.5.4"
+  }
 }

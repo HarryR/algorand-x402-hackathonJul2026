@@ -12,8 +12,9 @@
  *   5. capture+archive the serial boot log; enforce the profile wall-clock
  *      timeout; tear everything down.
  *
- * Requires the MicroNT artifacts (vmlinux + template initrd.zip) and FAT16
- * tooling. Gated on config.kernelPath; throws a clear message until they land.
+ * The MicroNT artifacts (vmlinux + initrd template + overlay) are embedded in
+ * the binary and resolved via ./artifacts.ts (kernel materialized to a real path
+ * for the QEMU subprocess); LUALAMBDA_KERNEL / LUALAMBDA_INITRD_TEMPLATE override.
  */
 
 import { mkdir } from 'node:fs/promises';
@@ -22,6 +23,7 @@ import { config } from '@/shared/config.ts';
 import type { GuestInput, GuestOutput } from '@/shared/protocol.ts';
 import { type ResourceProfile } from '@/shared/profiles.ts';
 import { allocatePort, releasePort } from './ports.ts';
+import { kernelPath } from './artifacts.ts';
 import { prepareInstance } from './instance.ts';
 import { buildStager } from './stager.ts';
 import { frameChunk, extractFramedResult, concat } from './record-protocol.ts';
@@ -54,15 +56,22 @@ export interface LaunchResult {
 class TimeoutError extends Error {}
 
 /** Build the QEMU argv for PVH direct-boot with the per-instance disk. */
-function qemuArgs(initrdPath: string, dataImagePath: string, profile: ResourceProfile): string[] {
+function qemuArgs(
+  kernelImage: string,
+  initrdPath: string,
+  dataImagePath: string,
+  profile: ResourceProfile,
+): string[] {
   const args = [
     '-machine',
     config.qemuMachine,
     '-m',
     String(profile.memoryMiB),
     // PVH direct-boot: loader ELF + initrd, cmdline names the agent + its port.
+    // kernelImage is a REAL on-disk path (embedded vmlinux is extracted first;
+    // QEMU is a foreign process and can't open a $bunfs path). See artifacts.ts.
     '-kernel',
-    config.kernelPath,
+    kernelImage,
     '-initrd',
     initrdPath,
     // Networking: SLIRP user-mode NAT; guest dials back to 10.0.2.2 → host.
@@ -157,12 +166,9 @@ function runProtocol(port: number, stager: string): Promise<GuestOutput> {
 
 /** Launch a guest VM and return its result. */
 export async function launch(req: LaunchRequest): Promise<LaunchResult> {
-  if (!config.kernelPath) {
-    throw new Error(
-      'VM launcher not yet wired: set LUALAMBDA_KERNEL to a MicroNT vmlinux ' +
-        '(see Milestone 0 in OUTLINE.md).',
-    );
-  }
+  // Materialize the kernel to a real on-disk path (embedded vmlinux is extracted
+  // once and memoized; LUALAMBDA_KERNEL overrides). Throws if it can't be written.
+  const kernelImage = await kernelPath();
 
   const startedAt = Date.now();
   await mkdir(config.bootLogDir, { recursive: true });
@@ -181,7 +187,7 @@ export async function launch(req: LaunchRequest): Promise<LaunchResult> {
     proc = Bun.spawn(
       [
         config.qemuBinary,
-        ...qemuArgs(instance.initrdPath, instance.dataImagePath, req.profile),
+        ...qemuArgs(kernelImage, instance.initrdPath, instance.dataImagePath, req.profile),
         '-append',
         kernelCmdline(port),
       ],

@@ -6,9 +6,19 @@
  * come from .env (gitignored) or a throwaway testnet key generated in-container.
  */
 
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { getNetwork, DEFAULT_NETWORK } from './networks.ts';
+
 function env(key: string, fallback: string): string {
   return process.env[key] ?? fallback;
 }
+
+// Network selection (default testnet). The USDC ASA id + CAIP-2 are hardcoded
+// per-network protocol constants from the bundle; only payTo is operator config.
+const network = getNetwork(env('LUALAMBDA_NETWORK', DEFAULT_NETWORK));
+const usdcAsaId = network.usdcAsaId;
+const payToAddress = env('LUALAMBDA_PAY_TO', '');
 
 export const config = {
   /** Where the orchestrator listens / the CLI points. */
@@ -18,33 +28,45 @@ export const config = {
   /** On-disk store for deployed function bundles. */
   dataDir: env('LUALAMBDA_DATA_DIR', '.lualambda/data'),
 
-  // --- x402 / Algorand (wired in Milestone 2) -------------------------------
+  // --- x402 / Algorand ------------------------------------------------------
 
-  /** CAIP-2 network id for Algorand testnet. */
-  algorandNetwork: env(
-    'LUALAMBDA_ALGORAND_NETWORK',
-    'algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI=',
-  ),
-  /** Managed facilitator; self-hosting is a stretch goal. */
+  /** Selected network ("testnet" | "mainnet"); default testnet. */
+  network: network.name,
+  /** CAIP-2 network id (from the network bundle). */
+  algorandNetwork: network.caip2,
+  /** Managed facilitator (GoPlausible); shared across networks (routes by CAIP-2). */
   facilitatorUrl: env('LUALAMBDA_FACILITATOR_URL', 'https://facilitator.goplausible.xyz'),
-  /** Testnet USDC ASA id — confirm from the docs before relying on it. */
-  usdcAsaId: env('LUALAMBDA_USDC_ASA_ID', ''),
-  /** Address that receives payments (the orchestrator's AVM address). */
-  payToAddress: env('LUALAMBDA_PAY_TO', ''),
+  /** USDC ASA id — hardcoded per-network protocol constant (not env). */
+  usdcAsaId,
+  /**
+   * Address that RECEIVES payments. Must be opted into the USDC ASA to hold it.
+   * The orchestrator holds no key — it only builds requirements + calls the
+   * facilitator (which fee-sponsors). Payments are gated on this being set.
+   */
+  payToAddress,
+  /**
+   * Payments are enforced only when payTo is set (the USDC ASA is always known
+   * from the network bundle); otherwise the orchestrator runs free, preserving
+   * the dev/E2E path.
+   */
+  paymentsEnabled: payToAddress !== '',
+
+  /** Algod endpoint for wallet balance / opt-in (network default, env-overridable). */
+  algodUrl: env('LUALAMBDA_ALGOD_URL', network.algodUrl),
+  /**
+   * Client wallet file. `LUALAMBDA_MNEMONIC` overrides it. Testnet throwaway
+   * keys only when on testnet.
+   */
+  walletPath: env('LUALAMBDA_WALLET', join(homedir(), '.config', 'lualambda', 'wallet.json')),
+  /** Explorer tx URL prefix for settlement receipts: `${base}/${txid}` (network default). */
+  explorerTxBase: env('LUALAMBDA_EXPLORER_TX_BASE', network.explorerTxBase),
 
   // --- QEMU / guest (Milestone 0) -------------------------------------------
 
-  /**
-   * PVH loader ELF (MicroNT vmlinux). Required to actually boot a VM. Defaults
-   * to the version-controlled vendored artifact; override in production.
-   */
-  kernelPath: env('LUALAMBDA_KERNEL', 'vendor/micront/vmlinux'),
-  /**
-   * Template initrd.zip (base system + baked-in agent pkg/main.lua). Per
-   * instance we rebuild a copy with our overlay + the user's pkg/*.zip merged
-   * in. Defaults to the version-controlled vendored artifact; override in prod.
-   */
-  initrdTemplatePath: env('LUALAMBDA_INITRD_TEMPLATE', 'vendor/micront/initrd.zip'),
+  // The kernel (vmlinux) + initrd template + overlay are embedded in the binary
+  // and resolved by src/orchestrator/artifacts.ts (which honors LUALAMBDA_KERNEL
+  // / LUALAMBDA_INITRD_TEMPLATE overrides) — not read from config here.
+
   /** QEMU binary; machine type (q35 gives PCI for virtio-net + NVMe). */
   qemuBinary: env('LUALAMBDA_QEMU', 'qemu-system-x86_64'),
   qemuMachine: env('LUALAMBDA_QEMU_MACHINE', 'q35'),
@@ -65,6 +87,13 @@ export const config = {
 
   /** Where per-instance boot logs are archived. */
   bootLogDir: env('LUALAMBDA_BOOTLOG_DIR', '.lualambda/bootlogs'),
+
+  // --- Upload limits (untrusted input; enforced at the API boundary) --------
+
+  /** Max package zips per invocation. */
+  maxPackagesPerInvoke: Number(env('LUALAMBDA_MAX_PACKAGES', '10')),
+  /** Max aggregate uploaded package bytes per invocation (default 200 MiB). */
+  maxUploadBytes: Number(env('LUALAMBDA_MAX_UPLOAD_BYTES', String(200 * 1024 * 1024))),
 } as const;
 
 export type Config = typeof config;

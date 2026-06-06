@@ -2,33 +2,34 @@
  * Per-instance disk/initrd preparation for a guest VM.
  *
  * For each invocation we materialise a throwaway instance directory holding:
- *   - initrd.zip   = a copy of the template with the user's pkg/*.zip baked in
+ *   - initrd.zip   = the template merged with our overlay + the user's pkg/*.zip
  *                    (STORED entries; the MicroNT Lua loader reads STORED only,
  *                    and the real template is 100% STORED, so we keep it STORED).
  *                    They land under pkg/ inside the zip → at runtime the loader
  *                    sees \SystemRoot\pkg\<name>.zip and require() resolves into
- *                    them. The connect-back agent (pkg/main.lua) is ALREADY in
- *                    the template, so we do NOT inject it.
+ *                    them. The connect-back agent (pkg/main.lua) ships in the
+ *                    template; our overlay overrides it with the port-from-arg fix.
  *   - data.img     = a fresh FAT16 disk image (MBR + one FAT16 partition) sized
  *                    to the profile's diskMiB, attached as a secondary NVMe
  *                    device → \Device\Harddisk1\Partition1 in the guest.
  *                    Discarded at teardown. Built in pure TS (src/shared/fat16
  *                    + drive), so no mkfs.fat/mtools dependency — verified by a
  *                    real guest mount + write/read round-trip.
- * vmlinux is referenced read-only from the template (no per-instance copy).
  *
- * Artifacts (template initrd.zip, vmlinux) must be present; callers gate on that.
+ * The template, overlay, and vmlinux are embedded in the binary (see
+ * ./artifacts.ts); vmlinux is materialized to a real path for QEMU in vm.ts.
  */
 
-import { $ } from 'bun';
-import { mkdir, rm, copyFile, cp } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdir, rm, readFile } from 'node:fs/promises';
+import { join, resolve, dirname } from 'node:path';
 import { config } from '@/shared/config.ts';
 import type { ResourceProfile } from '@/shared/profiles.ts';
 import { checkStoredOnly } from '@/shared/zipcheck.ts';
+import { readStoredZip } from '@/shared/zipread.ts';
+import { writeStoredZip } from '@/shared/zipwrite.ts';
 import { FatVolume } from '@/shared/fat16.ts';
 import { Drive } from '@/shared/drive.ts';
+import { initrdTemplateBytes, initrdTemplatePath, overlayEntries } from './artifacts.ts';
 import type { PackageMount } from './vm.ts';
 
 /**
@@ -37,14 +38,6 @@ import type { PackageMount } from './vm.ts';
  * prefix is the runtime NT path, NOT the in-zip path.
  */
 const PKG_DIR_IN_ZIP = 'pkg';
-
-/**
- * Tracked overlay merged into a copy of the pristine upstream initrd at instance
- * prep (the upstream artifact is never modified). Files here override matching
- * template entries — e.g. overlay/pkg/main.lua replaces the upstream agent with
- * the port-from-arg fix. See src/guest/overlay/README.md.
- */
-const OVERLAY_DIR = 'src/guest/overlay';
 
 export interface PreparedInstance {
   dir: string;
@@ -55,51 +48,45 @@ export interface PreparedInstance {
 }
 
 function assertArtifacts(): void {
-  if (!config.kernelPath) {
-    throw new Error('LUALAMBDA_KERNEL (vmlinux) is not set; cannot prepare an instance');
-  }
-  if (!config.initrdTemplatePath) {
-    throw new Error('LUALAMBDA_INITRD_TEMPLATE is not set; cannot build the initrd');
+  // Kernel + initrd default to embedded artifacts (see ./artifacts.ts), so these
+  // resolve unless an env override is explicitly blanked. The initrd template is
+  // what prepareInstance needs; the kernel is materialized later, in launch().
+  if (!initrdTemplatePath()) {
+    throw new Error('initrd template path is empty; cannot build the initrd');
   }
 }
 
 /**
- * Build the per-instance initrd: copy the PRISTINE template, then merge the
- * tracked overlay (our fixes, e.g. pkg/main.lua) and the user package zips into
- * pkg/. Uses `zip -0` (STORED) so the guest loader can read every entry —
- * including the nested package zips — and a `zip` update replaces matching
- * template entries (so the overlay overrides upstream). Re-validates that the
- * whole archive is STORED before the caller boots it.
+ * Build the per-instance initrd entirely in-process — no `zip` subprocess, so it
+ * works in a `bun build --compile` binary and on Windows (matching the rest of
+ * the project; see src/shared/zipwrite.ts). Read the PRISTINE template's STORED
+ * entries, then merge in the tracked overlay (our fixes, e.g. pkg/main.lua) and
+ * the user package zips under pkg/, with ours overriding matching template
+ * entries on path collision. Re-emit as a STORED archive the guest loader reads.
  */
 async function buildInitrd(dir: string, packages: PackageMount[]): Promise<string> {
-  const initrd = join(dir, 'initrd.zip');
-  await copyFile(config.initrdTemplatePath, initrd);
+  const templateBytes = await initrdTemplateBytes();
 
-  // Stage overlay + package zips under a temp tree, then `zip -0 -X` them into
-  // the copy. Overlay files keep their relative paths (e.g. pkg/main.lua);
-  // packages drop into pkg/. The README is excluded — it's docs, not payload.
-  const stage = join(dir, 'stage');
-  await mkdir(join(stage, PKG_DIR_IN_ZIP), { recursive: true });
-  if (existsSync(OVERLAY_DIR)) {
-    await cp(OVERLAY_DIR, stage, {
-      recursive: true,
-      filter: (src) => !src.endsWith('README.md'),
-    });
-  }
+  // Key by archive path so overlay/package entries override the template.
+  const merged = new Map<string, Uint8Array>();
+  for (const e of readStoredZip(templateBytes)) merged.set(e.path, e.data);
+  for (const e of await overlayEntries()) merged.set(e.path, e.data);
   for (const p of packages) {
-    await copyFile(p.path, join(stage, PKG_DIR_IN_ZIP, p.name));
+    const path = `${PKG_DIR_IN_ZIP}/${p.name}`;
+    merged.set(path, new Uint8Array(await readFile(p.path)));
   }
 
-  // -0 STORE (loader requirement), -X drop attrs, -r recurse, -q quiet.
-  await $`cd ${stage} && zip -0 -X -r -q ${initrd} .`.quiet();
-  await rm(stage, { recursive: true, force: true });
+  const bytes = writeStoredZip([...merged].map(([path, data]) => ({ path, data })));
 
-  // Guard: the guest loader reads STORED entries only. If anything in the
-  // rebuilt initrd is DEFLATE, fail loudly here rather than at boot.
-  const check = checkStoredOnly(await Bun.file(initrd).bytes());
+  // Guard: writeStoredZip is STORED by construction, but assert before boot so a
+  // future change can't silently produce an archive the guest loader can't read.
+  const check = checkStoredOnly(bytes);
   if (!check.ok) {
     throw new Error(`rebuilt initrd is not STORED-only: ${check.reason}`);
   }
+
+  const initrd = join(dir, 'initrd.zip');
+  await Bun.write(initrd, bytes);
   return initrd;
 }
 
@@ -125,7 +112,18 @@ export async function prepareInstance(
   profile: ResourceProfile,
 ): Promise<PreparedInstance> {
   assertArtifacts();
-  const dir = join(config.dataDir, 'instances', id);
+  // Defense-in-depth: `id` is validated at the API boundary
+  // (src/shared/validate.ts), but this dir feeds a recursive delete — assert it
+  // resolves to a direct child of the instances root so a missed/changed caller
+  // can't escape it via traversal. Reject, don't normalize.
+  const root = resolve(config.dataDir, 'instances');
+  const dir = resolve(join(root, id));
+  // Instance dirs are flat, one per id: the resolved path must be a DIRECT child
+  // of the instances root. This rejects traversal (`../x`), absolute paths, and
+  // nested ids (`a/b`) that a missed boundary check might let through.
+  if (dirname(dir) !== root) {
+    throw new Error(`refusing to prepare instance outside ${root}: ${id}`);
+  }
   await rm(dir, { recursive: true, force: true });
   await mkdir(dir, { recursive: true });
 

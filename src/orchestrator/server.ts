@@ -13,14 +13,15 @@
  *
  * There is no "deployed function": the package zips ride along on the paying
  * request. The id is opaque and client-chosen (deterministic hash or nametag);
- * the server never recomputes or validates it. x402's paymentMiddleware will
- * gate POST /invoke/:id/:profile in Milestone 2 — priced per profile path. The
- * `requirePayment` seam below marks exactly where that goes.
+ * the server never recomputes or validates it. POST /invoke/:id/:profile is
+ * x402-gated via ./payment.ts (verify+settle through the facilitator, priced per
+ * profile) when config.paymentsEnabled; otherwise it runs free.
  */
 
 import { config } from '@/shared/config.ts';
-import { PROFILES, getProfile, type ResourceProfile } from '@/shared/profiles.ts';
+import { PROFILES, getProfile } from '@/shared/profiles.ts';
 import { checkStoredOnly } from '@/shared/zipcheck.ts';
+import { assertValidId, assertValidPackageName, assertValidRequire } from '@/shared/validate.ts';
 import type {
   InvokeSpec,
   InvokeStatus,
@@ -28,6 +29,7 @@ import type {
   InvokeDiscovery,
   InvokeError,
   PackageRef,
+  SettlementReceipt,
 } from '@/shared/protocol.ts';
 import {
   savePackage,
@@ -38,6 +40,8 @@ import {
   type Invocation,
 } from './store.ts';
 import { launch } from './vm.ts';
+import { kernelPath } from './artifacts.ts';
+import { paymentsRequired, hasPaymentHeader, challenge, settle } from './payment.ts';
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -88,12 +92,14 @@ function handleDiscovery(): Response {
 }
 
 function handleStatus(id: string): Response {
+  assertValidId(id);
   const inv = getInvocation(id);
   if (!inv) return err(`unknown invocation "${id}"`, 404);
   return json(statusDoc(inv));
 }
 
 function handleOutput(id: string): Response {
+  assertValidId(id);
   const inv = getInvocation(id);
   if (!inv) return err(`unknown invocation "${id}"`, 404);
   if (inv.state === 'expired') return err(`output for "${id}" has expired`, 410);
@@ -108,22 +114,23 @@ function handleOutput(id: string): Response {
   } satisfies InvokeOutput);
 }
 
-/**
- * Payment seam. Milestone 2 replaces this with x402's paymentMiddleware in front
- * of the POST /invoke/:id/:profile route (priced per `profile.price`). Until
- * then we treat the request as paid so the run/retain/read flow is testable.
- */
-async function requirePayment(_req: Request, _profile: ResourceProfile): Promise<void> {
-  // dev: payment is a no-op until Milestone 2
-}
-
 async function handlePay(req: Request, id: string, profileName: string): Promise<Response> {
+  assertValidId(id); // untrusted: id becomes an instance dir + boot-log path
   const profile = getProfile(profileName); // throws → 400
 
   // One paid profile per id: reject a second payment with 409 + status.
   const existing = getInvocation(id);
   if (existing && existing.state !== 'expired') {
     return json(statusDoc(existing), 409);
+  }
+
+  // x402 gate. Issue the 402 from the URL profile alone — BEFORE reading the
+  // (potentially large) multipart body — when no payment is presented. The
+  // actual verify+settle happens after the packages are stored, just before
+  // launch (pay-first: a settled payment then runs; a later VM failure is not
+  // refunded). Disabled entirely when config.paymentsEnabled is false.
+  if (paymentsRequired() && !hasPaymentHeader(req)) {
+    return challenge(profile, new URL(req.url).pathname);
   }
 
   // Parse the multipart body: one or more "package" zips + a JSON "spec" field.
@@ -139,25 +146,54 @@ async function handlePay(req: Request, id: string, profileName: string): Promise
   if (!spec.require || typeof spec.require !== 'string') {
     return err('spec.require must be a dotted module string');
   }
+  assertValidRequire(spec.require); // untrusted: drives require() in the guest
   const args = Array.isArray(spec.args) ? spec.args.map(String) : [];
 
   const files = form.getAll('package').filter((f) => typeof f !== 'string');
   if (files.length === 0) return err('expected at least one "package" zip');
+  if (files.length > config.maxPackagesPerInvoke) {
+    return err(`too many packages: ${files.length} > ${config.maxPackagesPerInvoke} max`, 413);
+  }
 
-  // Store packages content-addressed; keep their upload filenames for the pkg dir.
-  // Reject DEFLATE zips up front — the MicroNT loader reads STORED entries only.
+  // Store packages content-addressed; the upload filename becomes the in-zip
+  // pkg entry (user code in the Lua namespace), so validate it as a path-safe
+  // name. Reject DEFLATE zips up front — the MicroNT loader reads STORED only —
+  // and cap the aggregate upload to bound memory/disk.
   const packages: PackageRef[] = [];
+  let totalBytes = 0;
   for (const f of files) {
+    assertValidPackageName(f.name); // no slashes/.. ; "<stem>.zip"
     const bytes = new Uint8Array(await f.arrayBuffer());
+    totalBytes += bytes.byteLength;
+    if (totalBytes > config.maxUploadBytes) {
+      return err(`upload too large: exceeds ${config.maxUploadBytes} bytes total`, 413);
+    }
     const check = checkStoredOnly(bytes);
     if (!check.ok) {
       return err(`package "${f.name}" must be a STORED (uncompressed) zip: ${check.reason}`);
     }
     const hash = await savePackage(bytes);
-    packages.push({ name: f.name || `${hash}.zip`, hash });
+    packages.push({ name: f.name, hash });
   }
 
-  await requirePayment(req, profile); // x402 gate goes here (Milestone 2)
+  // Verify + settle the payment before running (pay-first). On failure the
+  // client is re-challenged with a fresh 402. Reads req.headers only (the body
+  // is already consumed above). No-op when payments are disabled.
+  let receipt: SettlementReceipt | undefined;
+  let paymentResponseHeader: string | undefined;
+  if (paymentsRequired()) {
+    try {
+      const settled = await settle(req, profile);
+      receipt = settled.receipt;
+      paymentResponseHeader = settled.responseHeader;
+    } catch (e) {
+      return challenge(
+        profile,
+        new URL(req.url).pathname,
+        e instanceof Error ? e.message : undefined,
+      );
+    }
+  }
 
   // Record before running so a concurrent re-pay sees 'running'.
   const inv: Invocation = {
@@ -167,6 +203,7 @@ async function handlePay(req: Request, id: string, profileName: string): Promise
     require: spec.require,
     argsHash: await hashArgs(args),
     paidProfile: profile.name,
+    receipt,
     expiresAtMs: Number.MAX_SAFE_INTEGER, // set once the run completes
   };
   putInvocation(inv);
@@ -194,7 +231,11 @@ async function handlePay(req: Request, id: string, profileName: string): Promise
   }
 
   putInvocation(inv);
-  return handleOutput(id); // echo the output on the paying request
+  // Echo the output on the paying request, with the settlement header (x402
+  // PAYMENT-RESPONSE) attached so the client can read the on-chain confirmation.
+  const out = handleOutput(id);
+  if (paymentResponseHeader) out.headers.set('PAYMENT-RESPONSE', paymentResponseHeader);
+  return out;
 }
 
 // --- Dispatch ---------------------------------------------------------------
@@ -223,9 +264,24 @@ const server = Bun.serve({
       }
       return err('not found', 404);
     } catch (e) {
+      // Bad request — ValidationError (bad id/name/require), getProfile, JSON, etc.
       return err(e instanceof Error ? e.message : String(e), 400);
     }
   },
 });
 
 console.log(`lualambda orchestrator listening on http://localhost:${server.port}`);
+
+// Materialize the embedded kernel to a real on-disk path eagerly, so a broken
+// extraction fails loudly at boot rather than on the first invoke. Memoized, so
+// launch() reuses the same path. Non-VM routes (health/status) still work even
+// if this warns, so we don't exit the process.
+kernelPath()
+  .then((p) => console.log(`kernel ready at ${p}`))
+  .catch((e) => console.error(`FATAL: could not materialize kernel: ${e?.message ?? e}`));
+
+if (paymentsRequired()) {
+  console.log(`payments ENABLED → payTo=${config.payToAddress} asset=${config.usdcAsaId}`);
+} else {
+  console.warn('payments DISABLED (free) — set LUALAMBDA_PAY_TO to enforce x402');
+}
