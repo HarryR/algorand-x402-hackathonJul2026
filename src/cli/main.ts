@@ -14,22 +14,31 @@ function die(msg: string): never {
   process.exit(1);
 }
 
-// Extract --network (`--network x` or `--network=x`) from argv without consuming
-// anything else; run.ts re-parses the full argv (and accepts --network as a
-// no-op). Env var, if already set, is the fallback default.
+// Extract --network and --workdir (`--x v` or `--x=v`) from argv without
+// consuming anything else; run.ts re-parses the full argv (and accepts both as
+// no-ops). Both must be set into env BEFORE config loads — config reads them at
+// import time. --workdir matters for `invoke --local-test`, which boots a VM
+// in-process and writes under the workdir.
 const argv = Bun.argv.slice(2);
-let network: string | undefined;
-for (let i = 0; i < argv.length; i++) {
-  const a = argv[i]!;
-  if (a === '--network') network = argv[i + 1];
-  else if (a.startsWith('--network=')) network = a.slice('--network='.length);
+function flag(name: string): string | undefined {
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a === `--${name}`) return argv[i + 1];
+    if (a.startsWith(`--${name}=`)) return a.slice(`--${name}=`.length);
+  }
+  return undefined;
 }
+
+const network = flag('network');
 if (network !== undefined) {
   if (network !== 'testnet' && network !== 'mainnet') {
     die(`--network must be "testnet" or "mainnet" (got "${network ?? ''}")`);
   }
   process.env.LUALAMBDA_NETWORK = network;
 }
+
+const workdir = flag('workdir');
+if (workdir) process.env.LUALAMBDA_WORKDIR = workdir;
 
 // Import AFTER the env is set so config picks up the selected network.
 import('./run.ts')

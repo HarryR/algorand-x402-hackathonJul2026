@@ -17,7 +17,6 @@
  * for the QEMU subprocess); LUALAMBDA_KERNEL / LUALAMBDA_INITRD_TEMPLATE override.
  */
 
-import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { config } from '@/shared/config.ts';
 import type { GuestInput, GuestOutput } from '@/shared/protocol.ts';
@@ -37,7 +36,7 @@ export interface PackageMount {
 }
 
 export interface LaunchRequest {
-  /** Idempotency id — names the throwaway instance dir + boot-log file. */
+  /** Idempotency id — names the instance dir (which holds its boot.log). */
   id: string;
   /** Package zips to bake into the guest initrd pkg dir before booting. */
   packages: PackageMount[];
@@ -49,8 +48,14 @@ export interface LaunchResult {
   output: GuestOutput;
   /** Wall-clock the VM was alive, ms. */
   vmWallMs: number;
-  /** Path to the archived boot log. */
-  bootLogPath: string;
+  /** Retained instance dir (initrd + data.img + boot.log). */
+  instanceDir: string;
+  /**
+   * Best-effort teardown of the instance dir. `launch` no longer cleans up
+   * itself — the caller decides when (server: on invocation expiry; local-test:
+   * directly), so the dir survives for the retention window / for inspection.
+   */
+  cleanup: () => Promise<void>;
 }
 
 class TimeoutError extends Error {}
@@ -171,11 +176,10 @@ export async function launch(req: LaunchRequest): Promise<LaunchResult> {
   const kernelImage = await kernelPath();
 
   const startedAt = Date.now();
-  await mkdir(config.bootLogDir, { recursive: true });
-  const bootLogPath = join(config.bootLogDir, `${req.id}.log`);
-
   const port = await allocatePort();
   const instance = await prepareInstance(req.id, req.packages, req.profile);
+  // Boot log lives inside the (retained) instance dir.
+  const bootLogPath = join(instance.dir, 'boot.log');
   const stager = buildStager(req.input.require, req.input.args);
 
   const bootLogParts: Uint8Array[] = [];
@@ -210,13 +214,14 @@ export async function launch(req: LaunchRequest): Promise<LaunchResult> {
     });
 
     const output = await Promise.race([runProtocol(port, stager), timeout]);
-    return { output, vmWallMs: Date.now() - startedAt, bootLogPath };
+    return { output, vmWallMs: Date.now() - startedAt, instanceDir: instance.dir, cleanup: instance.cleanup };
   } catch (e) {
     if (e instanceof TimeoutError) {
       return {
         output: { ok: false, error: e.message },
         vmWallMs: Date.now() - startedAt,
-        bootLogPath,
+        instanceDir: instance.dir,
+        cleanup: instance.cleanup,
       };
     }
     throw e;
@@ -227,8 +232,9 @@ export async function launch(req: LaunchRequest): Promise<LaunchResult> {
     } catch {
       /* already exited */
     }
+    // Persist the serial log into the retained instance dir. We do NOT clean up
+    // here anymore — retention is the caller's call (see LaunchResult.cleanup).
     await Bun.write(bootLogPath, concat(bootLogParts)).catch(() => {});
-    await instance.cleanup().catch(() => {});
     releasePort(port);
   }
 }

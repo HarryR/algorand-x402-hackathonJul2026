@@ -22,7 +22,8 @@ import { PROFILES, DEFAULT_PROFILE } from '@/shared/profiles.ts';
 import type { InvokeOutput, InvokeStatus, InvokeDiscovery } from '@/shared/protocol.ts';
 import { deriveId } from '@/shared/idempotency.ts';
 import { baseUnitsToUsd } from '@/shared/units.ts';
-import { resolvePackage } from './zip.ts';
+import { resolvePackage, type PackageZip } from './zip.ts';
+import { runLocal } from '@/orchestrator/local.ts';
 import { payingFetch } from './payment.ts';
 import * as wallet from './wallet.ts';
 import { addressQr } from './qr.ts';
@@ -32,7 +33,11 @@ const USAGE = `lualambda — pay-per-run Lua packages on Algorand (x402)
 Usage:
   lualambda invoke [<id>] --pkg <dir|zip> [--pkg <dir|zip> ...] --require <module>
                    [--arg <v> ...] [--profile nano|small|med] [--max-price <usd>]
+                   [--local-test [--keep]]
                    (a directory is zipped in-process; a .zip is uploaded verbatim)
+                   (--local-test boots the package in a local QEMU VM — no server,
+                    no payment, no wallet; needs qemu-system-x86_64 on PATH.
+                    --keep retains the instance dir + boot.log for inspection)
   lualambda status <id>
   lualambda output <id>
   lualambda profiles
@@ -49,6 +54,8 @@ derive a deterministic id from the packages + module + args.
 
 Global:
   --network testnet|mainnet   (default testnet; or LUALAMBDA_NETWORK)
+  --workdir <dir>             (writable dir for --local-test; or LUALAMBDA_WORKDIR;
+                               default ~/.local/share/lualambda)
 
 Env:
   LUALAMBDA_ORCHESTRATOR_URL  (default ${config.orchestratorUrl})
@@ -76,6 +83,13 @@ async function cmdInvoke(positionals: string[], values: Record<string, unknown>)
   const maxPrice = values['max-price'] ? Number(values['max-price']) : undefined;
 
   const pkgs = await Promise.all(pkgPaths.map((p) => resolvePackage(p)));
+
+  // Local dry-run: boot the package in a local QEMU VM via the shared core, no
+  // server/payment. A faithful preview of a real invoke (same id/store/launch).
+  if (values['local-test']) {
+    return cmdInvokeLocal(pkgs, requireMod, args, profile, positionals[0], values.keep === true);
+  }
+
   const id =
     positionals[0] ??
     (await deriveId(
@@ -120,6 +134,42 @@ async function cmdInvoke(positionals: string[], values: Record<string, unknown>)
   console.log(JSON.stringify(out.result, null, 2));
   if (out.receipt) console.log(`\nsettled: ${out.receipt.txid}\n${out.receipt.explorerUrl}`);
   console.log(`\n(${out.metering.profile}, ${out.metering.vmWallMs}ms)`);
+}
+
+/**
+ * `invoke --local-test`: boot the package in a local QEMU VM via the shared
+ * runLocal core — no orchestrator, no payment, no wallet. A faithful preview of a
+ * real invoke. By default the instance dir is removed after printing; `--keep`
+ * (and any failure) leaves it so its boot.log can be inspected.
+ */
+async function cmdInvokeLocal(
+  pkgs: PackageZip[],
+  requireMod: string,
+  args: string[],
+  profile: string,
+  id: string | undefined,
+  keep: boolean,
+): Promise<void> {
+  const res = await runLocal({
+    packages: pkgs.map((p) => ({ name: p.name, bytes: p.bytes })),
+    require: requireMod,
+    args,
+    profileName: profile,
+    id,
+  });
+
+  if (!res.output.ok) {
+    console.error(`local-test failed: ${res.output.error ?? 'guest produced no result'}`);
+    console.error(`boot log: ${res.instanceDir}/boot.log`);
+    process.exitCode = 1;
+    return; // keep the dir on failure for debugging
+  }
+
+  console.log(`id: ${res.id}`);
+  console.log(JSON.stringify(res.output.result, null, 2));
+  console.log(`\n(${profile}, ${res.vmWallMs}ms, local)`);
+  if (keep) console.log(`instance: ${res.instanceDir}`);
+  else await res.cleanup();
 }
 
 async function cmdStatus(positionals: string[]): Promise<void> {
@@ -230,9 +280,12 @@ export async function run(): Promise<void> {
       arg: { type: 'string', multiple: true },
       profile: { type: 'string' },
       'max-price': { type: 'string' },
+      'local-test': { type: 'boolean' }, // run the VM locally; no server/payment
+      keep: { type: 'boolean' }, // keep the local-test instance dir for inspection
       force: { type: 'boolean' },
       mnemonic: { type: 'string' },
       network: { type: 'string' }, // handled by the entry shim; accepted here
+      workdir: { type: 'string' }, // handled by the entry shim; accepted here
     },
   });
 

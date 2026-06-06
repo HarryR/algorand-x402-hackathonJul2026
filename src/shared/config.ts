@@ -14,6 +14,19 @@ function env(key: string, fallback: string): string {
   return process.env[key] ?? fallback;
 }
 
+/**
+ * Resolve the single writable working directory that holds everything the
+ * orchestrator/CLI persist (pkg/, instances/<id>/, runtime/vmlinux). Precedence:
+ *   LUALAMBDA_WORKDIR  (canonical override)
+ *   LUALAMBDA_DATA_DIR (back-compat: the old name for this dir)
+ *   $XDG_DATA_HOME/lualambda, else ~/.local/share/lualambda  (XDG default)
+ * Pure (takes an env bag) so it's unit-testable without re-importing config.
+ */
+export function resolveWorkDir(e: Record<string, string | undefined> = process.env): string {
+  const xdgDataHome = e.XDG_DATA_HOME ?? join(homedir(), '.local', 'share');
+  return e.LUALAMBDA_WORKDIR ?? e.LUALAMBDA_DATA_DIR ?? join(xdgDataHome, 'lualambda');
+}
+
 // Network selection (default testnet). The USDC ASA id + CAIP-2 are hardcoded
 // per-network protocol constants from the bundle; only payTo is operator config.
 const network = getNetwork(env('LUALAMBDA_NETWORK', DEFAULT_NETWORK));
@@ -25,8 +38,13 @@ export const config = {
   orchestratorUrl: env('LUALAMBDA_ORCHESTRATOR_URL', 'http://localhost:8402'),
   orchestratorPort: Number(env('LUALAMBDA_PORT', '8402')),
 
-  /** On-disk store for deployed function bundles. */
-  dataDir: env('LUALAMBDA_DATA_DIR', '.lualambda/data'),
+  /**
+   * The single writable working directory: holds pkg/, instances/<id>/ (each
+   * with initrd.zip + data.img + boot.log), and runtime/vmlinux. Set with
+   * LUALAMBDA_WORKDIR (LUALAMBDA_DATA_DIR honored as a back-compat alias);
+   * defaults to ~/.local/share/lualambda. See resolveWorkDir.
+   */
+  workDir: resolveWorkDir(),
 
   // --- x402 / Algorand ------------------------------------------------------
 
@@ -85,8 +103,7 @@ export const config = {
   portRangeStart: Number(env('LUALAMBDA_PORT_RANGE_START', '24000')),
   portRangeEnd: Number(env('LUALAMBDA_PORT_RANGE_END', '24999')),
 
-  /** Where per-instance boot logs are archived. */
-  bootLogDir: env('LUALAMBDA_BOOTLOG_DIR', '.lualambda/bootlogs'),
+  // Boot logs are written per-instance to <workDir>/instances/<id>/boot.log.
 
   // --- Upload limits (untrusted input; enforced at the API boundary) --------
 

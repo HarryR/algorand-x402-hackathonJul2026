@@ -6,8 +6,10 @@
  * sha256 (cheap dedup if the same package recurs) and hold invocation records in
  * memory, expiring their retained output per the paid profile's retainSeconds.
  *
- * Layout under config.dataDir:
+ * Layout under config.workDir:
  *   pkg/<sha256>.zip       — content-addressed package bytes
+ *   instances/<id>/        — retained per-instance dir (initrd + data.img +
+ *                            boot.log), removed when the invocation expires.
  */
 
 import { mkdir } from 'node:fs/promises';
@@ -21,6 +23,7 @@ import type {
   Metering,
 } from '@/shared/protocol.ts';
 import type { ProfileName } from '@/shared/profiles.ts';
+import { removeInstanceDir } from './instance.ts';
 
 // --- Hashing ----------------------------------------------------------------
 
@@ -39,7 +42,7 @@ export function argsHash(args: string[]): Promise<string> {
 // --- Package storage (content-addressed) ------------------------------------
 
 function pkgPath(hash: string): string {
-  return join(config.dataDir, 'pkg', `${hash}.zip`);
+  return join(config.workDir, 'pkg', `${hash}.zip`);
 }
 
 /** Store one package zip, return its content hash. Idempotent by content. */
@@ -47,7 +50,7 @@ export async function savePackage(zip: ArrayBuffer | Uint8Array): Promise<string
   const hash = await sha256Hex(zip);
   const f = Bun.file(pkgPath(hash));
   if (!(await f.exists())) {
-    await mkdir(join(config.dataDir, 'pkg'), { recursive: true });
+    await mkdir(join(config.workDir, 'pkg'), { recursive: true });
     await Bun.write(pkgPath(hash), zip);
   }
   return hash;
@@ -93,6 +96,10 @@ export function getInvocation(id: IdempotencyId): Invocation | undefined {
     delete inv.result;
     delete inv.receipt;
     delete inv.metering;
+    // Reap the retained instance dir (initrd + data.img + boot.log) lazily, the
+    // same way we drop the in-memory output. Fire-and-forget so the getter stays
+    // synchronous; best-effort inside removeInstanceDir.
+    void removeInstanceDir(inv.id);
   }
   return inv;
 }

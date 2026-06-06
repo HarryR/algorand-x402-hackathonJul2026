@@ -105,25 +105,44 @@ async function provisionDataImage(dir: string, diskMiB: number): Promise<string>
   return img;
 }
 
-/** Prepare a throwaway instance (initrd + data disk). Caller must cleanup(). */
+/**
+ * Resolve the directory for instance `id`, asserting it's a DIRECT child of the
+ * instances root under the workdir. Defense-in-depth: `id` is validated at the
+ * API boundary (src/shared/validate.ts), but this path feeds a recursive delete,
+ * so we reject (don't normalize) traversal (`../x`), absolute paths, and nested
+ * ids (`a/b`) that a missed boundary check might let through.
+ */
+export function instanceDir(id: string): string {
+  const root = resolve(config.workDir, 'instances');
+  const dir = resolve(join(root, id));
+  if (dirname(dir) !== root) {
+    throw new Error(`refusing to prepare instance outside ${root}: ${id}`);
+  }
+  return dir;
+}
+
+/**
+ * Best-effort remove an instance's retained directory (initrd + data.img +
+ * boot.log). Used when an invocation expires (see store.ts getInvocation). Safe
+ * to call for an id whose dir doesn't exist.
+ */
+export async function removeInstanceDir(id: string): Promise<void> {
+  await rm(instanceDir(id), { recursive: true, force: true }).catch(() => {});
+}
+
+/**
+ * Prepare a throwaway instance (initrd + data disk) under the workdir. The dir is
+ * retained after launch for the profile's retention window; cleanup is the
+ * caller's responsibility (server: on invocation expiry; local-test: directly).
+ */
 export async function prepareInstance(
   id: string,
   packages: PackageMount[],
   profile: ResourceProfile,
 ): Promise<PreparedInstance> {
   assertArtifacts();
-  // Defense-in-depth: `id` is validated at the API boundary
-  // (src/shared/validate.ts), but this dir feeds a recursive delete — assert it
-  // resolves to a direct child of the instances root so a missed/changed caller
-  // can't escape it via traversal. Reject, don't normalize.
-  const root = resolve(config.dataDir, 'instances');
-  const dir = resolve(join(root, id));
-  // Instance dirs are flat, one per id: the resolved path must be a DIRECT child
-  // of the instances root. This rejects traversal (`../x`), absolute paths, and
-  // nested ids (`a/b`) that a missed boundary check might let through.
-  if (dirname(dir) !== root) {
-    throw new Error(`refusing to prepare instance outside ${root}: ${id}`);
-  }
+  const dir = instanceDir(id);
+  // A retained dir from a prior same-id run is wiped here before we recreate it.
   await rm(dir, { recursive: true, force: true });
   await mkdir(dir, { recursive: true });
 

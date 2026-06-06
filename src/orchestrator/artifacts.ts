@@ -73,7 +73,7 @@ async function materializeKernel(): Promise<string> {
   if (override) return override;
 
   const bytes = await Bun.file(KERNEL_FILE).bytes();
-  const dir = join(config.dataDir, 'runtime');
+  const dir = join(config.workDir, 'runtime');
   await mkdir(dir, { recursive: true });
 
   // Atomic publish: write to a temp name, then rename into place, so a racing

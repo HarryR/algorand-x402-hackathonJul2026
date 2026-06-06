@@ -46,7 +46,7 @@ test('overlayEntries yields exactly pkg/main.lua matching the source file', asyn
 
 test('kernelPath materializes a real, readable on-disk file', async () => {
   // No LUALAMBDA_KERNEL override in the test env → extracts the embedded vmlinux
-  // into config.dataDir/runtime. kernelPath() memoizes, so this is the one call.
+  // into config.workDir/runtime. kernelPath() memoizes, so this is the one call.
   const p = await kernelPath();
   expect(existsSync(p)).toBe(true);
   expect(p).toMatch(/runtime[/\\]vmlinux$/);
