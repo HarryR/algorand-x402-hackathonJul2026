@@ -33,3 +33,5 @@ initrd.zip
 
 # Claude Code local (personal) settings — shared config goes in settings.json
 .claude/settings.local.json
+
+tmp/

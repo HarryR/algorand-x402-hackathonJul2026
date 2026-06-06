@@ -56,9 +56,12 @@ bun run cli -- output <id>
 ```
 src/
   cli/           lualambda CLI (cross-compiles to a single binary)
-  orchestrator/  HTTP API, package + invocation store, QEMU VM launcher
-  guest/         MicroNT init.lua shim (the in-VM runtime)
-  shared/        wire contracts, resource profiles, config
+  orchestrator/  HTTP API, store, QEMU launcher (vm.ts), instance prep,
+                 connect-back record protocol, host-sent stager, ports
+  guest/         overlay/ merged into the upstream initrd (port-fix agent);
+                 the connect-back agent itself ships baked into initrd.zip
+  shared/        wire contracts, profiles, config, zip read/write,
+                 fat16 + mbr + drive (pure-TS FAT16 disk builder)
 examples/hello/  sample package (zips to hello.zip, required as `hello`)
 build.sh         build both binaries into build/<target>/ (default linux-x64)
 .github/         CI: full build; release tags (v*) publish binaries

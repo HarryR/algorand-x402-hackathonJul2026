@@ -2,8 +2,8 @@
  * Wire contracts shared between CLI ↔ orchestrator ↔ guest.
  *
  * Keep these dependency-free: the CLI cross-compiles to a single binary, the
- * orchestrator runs on the server, and a Lua mirror of the guest contract lives
- * in src/guest/init.lua — all three must agree on these shapes.
+ * orchestrator runs on the server, and the guest agent (src/guest/main.lua) plus
+ * the host-sent stager (src/orchestrator/stager.ts) speak the matching Lua side.
  *
  * Execution model: there is no "deployed function." An invocation is a set of
  * package zips + a module to `require` + an array of args. The zips are dropped
@@ -137,12 +137,13 @@ export interface Metering {
   profile: ProfileName;
 }
 
-// --- Guest contract (mirrored in init.lua) ----------------------------------
+// --- Guest contract ---------------------------------------------------------
 
 /**
- * The JSON envelope the host injects into the guest and reads back out over the
- * result channel (VirtIO console to start). One line of JSON in each direction.
- * The package zips themselves are placed in the pkg dir out of band.
+ * What the host needs the guest to run: which baked-in module to `require` and
+ * the positional args. The host-sent stager (src/orchestrator/stager.ts)
+ * interpolates these and emits the result framed by the sentinels below; the
+ * package zips are baked into the initrd pkg dir out of band.
  */
 export interface GuestInput {
   /** Dotted module to `require`. */
@@ -158,6 +159,9 @@ export interface GuestOutput {
   error?: string;
 }
 
-/** Sentinel lines on the console framing the JSON result (init.lua emits these). */
+/**
+ * Sentinel lines framing the single JSON result line the stager sends back over
+ * the connect-back socket (parsed host-side by extractFramedResult()).
+ */
 export const RESULT_BEGIN = '---LUALAMBDA-RESULT-BEGIN---';
 export const RESULT_END = '---LUALAMBDA-RESULT-END---';

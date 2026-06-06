@@ -213,6 +213,47 @@ lualambda wallet  status                      # Algorand account + USDC balance
 
 ---
 
+## Instance lifecycle (Milestone 0 — locked decisions)
+
+Grounded in the MicroNT/nt365 reference handlers (`boot.sh`, `agenthost.py`,
+guest `main.lua`). The orchestrator's VM launcher follows these conventions.
+
+**Boot shape — PVH ramdisk direct-boot.** `qemu-system-x86_64 -kernel <vmlinux>
+-initrd <initrd.zip> -append "<cmdline>"`, no OVMF / no ESP drive (per `boot.sh
+--ramdisk`). The cmdline's `-- <module> <args...>` tail names the Lua module the
+guest `require()`s and its args — the same require/args contract the CLI already
+speaks. Machine: `microvm` (no-PCI minimal) or `q35`; we use the PCI shape (q35)
+so virtio-net + the secondary NVMe disk are available.
+
+**Per-instance preparation (fresh each call):**
+1. **vmlinux** — copy/reference the template PVH loader (read-only, shared).
+2. **initrd.zip** — built per instance = template base system + the agent
+   `main.lua` + the user's `pkg/*.zip` **baked in** (present at boot under
+   `\SystemRoot\pkg\`, so `require('hello')` resolves with no runtime staging).
+3. **Data disk** — provision a **fresh FAT16 (LFS) image** sized to the
+   profile's `diskMiB`, attached as a **secondary NVMe** device. Discarded at
+   teardown (strongest per-tenant isolation). Needs `mkfs.fat`/`mtools`.
+
+**Result channel — connect-back over SLIRP.** SLIRP user-mode NAT, gateway
+`10.0.2.2`. The guest agent brings up DHCP and **dials back** to the host on a
+**per-instance port** (one listener per running VM); the host hands it one
+length-prefixed Lua **stager** chunk, then drives the `agenthost.py` record
+protocol: `F` (write file), `R`/`C` (spawn + wait), `Q` (quit). Because packages
+are baked into the initrd, the normal path is just `R` → `require(module)(args)`
+→ framed JSON result back over the socket. **No console grepping** — the serial
+console is captured purely as a **boot log (archived)**; results ride the TCP
+socket. Integers on the wire are u32 little-endian.
+
+**Lifespan — per-profile wall-clock timeout.** Each profile carries a
+`maxWallMs`; the orchestrator kills QEMU at the limit, returns a timeout error,
+and archives the boot log. (CPU/mem/disk caps per the profile table elsewhere.)
+
+> Status: artifacts (`vmlinux`, template `initrd.zip`, FAT16 build tool) are not
+> yet in-repo. The launcher is implemented to these conventions and **gated on
+> artifact presence** (`LUALAMBDA_KERNEL` etc.) — it no-ops cleanly until they
+> land, so the pure host-side parts (record codec, port allocation, timeouts)
+> are unit-tested now and the QEMU path is exercised once artifacts arrive.
+
 ## Build plan (hackathon-scoped)
 
 ### Milestone 0 — spike & de-risk (do first)

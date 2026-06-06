@@ -32,11 +32,39 @@ export const config = {
   /** Address that receives payments (the orchestrator's AVM address). */
   payToAddress: env('LUALAMBDA_PAY_TO', ''),
 
-  // --- QEMU / guest ---------------------------------------------------------
+  // --- QEMU / guest (Milestone 0) -------------------------------------------
 
-  /** PVH kernel image (MicroNT vmlinux). Set once the spike has artifacts. */
-  kernelPath: env('LUALAMBDA_KERNEL', ''),
+  /**
+   * PVH loader ELF (MicroNT vmlinux). Required to actually boot a VM. Defaults
+   * to the in-repo artifact under tmp/; override in production.
+   */
+  kernelPath: env('LUALAMBDA_KERNEL', 'tmp/vmlinux'),
+  /**
+   * Template initrd.zip (base system + baked-in agent pkg/main.lua). Per
+   * instance we rebuild a copy with the user's pkg/*.zip appended. Defaults to
+   * the in-repo artifact under tmp/; override in production.
+   */
+  initrdTemplatePath: env('LUALAMBDA_INITRD_TEMPLATE', 'tmp/initrd.zip'),
+  /** QEMU binary; machine type (q35 gives PCI for virtio-net + NVMe). */
   qemuBinary: env('LUALAMBDA_QEMU', 'qemu-system-x86_64'),
+  qemuMachine: env('LUALAMBDA_QEMU_MACHINE', 'q35'),
+  /**
+   * Use hardware virtualization when /dev/kvm is available. In the dev
+   * container we default to TCG (off); the packaged orchestrator flips this on.
+   */
+  qemuKvm: env('LUALAMBDA_QEMU_KVM', '') === '1',
+
+  /** SLIRP gateway the guest dials back to (QEMU user-mode NAT). */
+  slirpGateway: '10.0.2.2',
+  /**
+   * Per-instance connect-back ports are allocated from this inclusive range on
+   * the host loopback; one listener per running VM.
+   */
+  portRangeStart: Number(env('LUALAMBDA_PORT_RANGE_START', '24000')),
+  portRangeEnd: Number(env('LUALAMBDA_PORT_RANGE_END', '24999')),
+
+  /** Where per-instance boot logs are archived. */
+  bootLogDir: env('LUALAMBDA_BOOTLOG_DIR', '.lualambda/bootlogs'),
 } as const;
 
 export type Config = typeof config;

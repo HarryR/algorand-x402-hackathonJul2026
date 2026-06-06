@@ -6,7 +6,19 @@ test('every profile is self-consistent and named', () => {
     expect(p.name).toBe(key as typeof p.name);
     expect(p.memoryMiB).toBeGreaterThan(0);
     expect(p.diskMiB).toBeGreaterThan(0);
+    expect(p.maxWallMs).toBeGreaterThan(0);
+    expect(p.retainSeconds).toBeGreaterThan(0);
+    expect(p.maxOutputBytes).toBeGreaterThan(0);
     expect(p.price).toMatch(/^\$\d/);
+  }
+});
+
+test('time/disk/price scale monotonically across tiers', () => {
+  const order = [PROFILES.nano, PROFILES.small, PROFILES.med];
+  for (let i = 1; i < order.length; i++) {
+    expect(order[i]!.maxWallMs).toBeGreaterThanOrEqual(order[i - 1]!.maxWallMs);
+    expect(order[i]!.memoryMiB).toBeGreaterThanOrEqual(order[i - 1]!.memoryMiB);
+    expect(order[i]!.diskMiB).toBeGreaterThanOrEqual(order[i - 1]!.diskMiB);
   }
 });
 

@@ -173,6 +173,7 @@ async function handlePay(req: Request, id: string, profileName: string): Promise
 
   try {
     const { output, vmWallMs } = await launch({
+      id,
       packages: packages.map((p) => ({ name: p.name, path: packageFile(p.hash) })),
       input: { require: spec.require, args },
       profile,

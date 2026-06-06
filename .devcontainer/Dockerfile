@@ -9,9 +9,13 @@ FROM oven/bun:debian
 # --- System tooling -----------------------------------------------------------
 # qemu-system-x86: run MicroNT microVMs in TCG mode (no KVM needed in dev).
 # qemu-utils:      qemu-img for building/inspecting disk images.
-# zip/unzip:       function bundle packaging.
+# zip/unzip:       function bundle packaging + per-instance initrd assembly.
 # ca-certificates: TLS to the facilitator + Algorand testnet.
 # git, less, jq, procps: day-to-day dev ergonomics.
+#
+# NB: no dosfstools/mtools — the FAT16 data disk is built in pure TS
+# (src/shared/fat16.ts + drive.ts, ported from nt.fs.fat16), verified mountable
+# by the guest's own nvme2k + fastfat. No native FAT tooling needed.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       qemu-system-x86 \

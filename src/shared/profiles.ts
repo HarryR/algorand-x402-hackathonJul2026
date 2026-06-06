@@ -24,6 +24,11 @@ export interface ResourceProfile {
   /** Userspace bandwidth throttle target, in Mbps (0 = unthrottled). */
   bandwidthMbps: number;
   /**
+   * Maximum wall-clock the guest VM may run before the orchestrator kills it,
+   * in milliseconds. On timeout the run errors and the boot log is archived.
+   */
+  maxWallMs: number;
+  /**
    * How long the invocation output is retained and readable via
    * `GET /invoke/:id/output` after the run completes, in seconds.
    */
@@ -41,6 +46,7 @@ export const PROFILES: Record<ProfileName, ResourceProfile> = {
     cpu: 'throttled',
     diskMiB: 16,
     bandwidthMbps: 1,
+    maxWallMs: 10_000,
     retainSeconds: 60,
     maxOutputBytes: 64 * 1024,
     price: '$0.001',
@@ -51,6 +57,7 @@ export const PROFILES: Record<ProfileName, ResourceProfile> = {
     cpu: 'shared',
     diskMiB: 64,
     bandwidthMbps: 5,
+    maxWallMs: 30_000,
     retainSeconds: 5 * 60,
     maxOutputBytes: 256 * 1024,
     price: '$0.005',
@@ -61,6 +68,7 @@ export const PROFILES: Record<ProfileName, ResourceProfile> = {
     cpu: 'full',
     diskMiB: 256,
     bandwidthMbps: 25,
+    maxWallMs: 120_000,
     retainSeconds: 30 * 60,
     maxOutputBytes: 1024 * 1024,
     price: '$0.02',
