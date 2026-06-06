@@ -38,7 +38,7 @@ const USAGE = `lualambda — pay-per-run Lua packages on Algorand (x402)
 Usage:
   lualambda invoke [<id>] [--pkg <dir|zip|file.lua> ...] [--require <module>]
                    [--arg <v> ...] [--profile nano|small|med] [--max-price <usd>]
-                   [--local-test [--keep]]
+                   [--local-test [--keep] [--console]]
                    (with no --pkg, reads a Lua script from stdin:
                       lualambda invoke < script.lua
                     a directory is zipped in-process; a .zip is uploaded verbatim;
@@ -46,7 +46,8 @@ Usage:
                     to the module/file name; required only with multiple --pkg.)
                    (--local-test boots the package in a local QEMU VM — no server,
                     no payment, no wallet; needs qemu-system-x86_64 on PATH.
-                    --keep retains the instance dir + boot.log for inspection)
+                    --keep retains the instance dir + boot.log for inspection;
+                    --console streams the guest serial console live to stderr)
   lualambda status <id>
   lualambda output <id>
   lualambda profiles
@@ -159,7 +160,10 @@ async function cmdInvoke(positionals: string[], values: Record<string, unknown>)
   // Local dry-run: boot the package in a local QEMU VM via the shared core, no
   // server/payment. A faithful preview of a real invoke (same id/store/launch).
   if (values['local-test']) {
-    return cmdInvokeLocal(pkgs, requireMod, args, profile, positionals[0], values.keep === true);
+    return cmdInvokeLocal(pkgs, requireMod, args, profile, positionals[0], {
+      keep: values.keep === true,
+      console: values.console === true,
+    });
   }
 
   const id =
@@ -234,18 +238,28 @@ async function cmdInvokeLocal(
   args: string[],
   profile: string,
   id: string | undefined,
-  keep: boolean,
+  opts: { keep: boolean; console: boolean },
 ): Promise<void> {
+  // --console streams the guest serial console live to stderr as it boots, so a
+  // failing/hanging boot is visible without digging into boot.log afterwards.
+  const onSerial = opts.console
+    ? (chunk: Uint8Array) => process.stderr.write(chunk)
+    : undefined;
+
   const res = await runLocal({
     packages: pkgs.map((p) => ({ name: p.name, bytes: p.bytes })),
     require: requireMod,
     args,
     profileName: profile,
     id,
+    onSerial,
   });
 
   if (!res.output.ok) {
     console.error(`local-test failed: ${res.output.error ?? 'guest produced no result'}`);
+    // Surface the tail of the serial log inline (unless it was already streamed),
+    // so the reason is visible without opening the file.
+    if (!opts.console) await printBootLogTail(`${res.instanceDir}/boot.log`);
     console.error(`boot log: ${res.instanceDir}/boot.log`);
     process.exitCode = 1;
     return; // keep the dir on failure for debugging
@@ -254,8 +268,18 @@ async function cmdInvokeLocal(
   console.log(`id: ${res.id}`);
   console.log(JSON.stringify(res.output.result, null, 2));
   console.log(`\n(${profile}, ${res.vmWallMs}ms, local)`);
-  if (keep) console.log(`instance: ${res.instanceDir}`);
+  if (opts.keep) console.log(`instance: ${res.instanceDir}`);
   else await res.cleanup();
+}
+
+/** Print the last `n` lines of a boot.log to stderr (best-effort; missing → skip). */
+async function printBootLogTail(path: string, n = 30): Promise<void> {
+  const text = await readFile(path, 'utf8').catch(() => '');
+  if (!text) return;
+  const lines = text.split('\n');
+  console.error(`--- boot.log (last ${n} lines) ---`);
+  console.error(lines.slice(-n).join('\n'));
+  console.error('--- end boot.log ---');
 }
 
 async function cmdStatus(positionals: string[]): Promise<void> {
@@ -380,6 +404,7 @@ export async function run(): Promise<void> {
       'max-price': { type: 'string' },
       'local-test': { type: 'boolean' }, // run the VM locally; no server/payment
       keep: { type: 'boolean' }, // keep the local-test instance dir for inspection
+      console: { type: 'boolean' }, // stream the guest serial console live (local-test)
       force: { type: 'boolean' },
       mnemonic: { type: 'string' },
       network: { type: 'string' }, // handled by the entry shim; accepted here

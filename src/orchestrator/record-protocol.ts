@@ -31,6 +31,11 @@ function u32le(n: number): Uint8Array {
   return b;
 }
 
+/** Read a little-endian u32 at `offset` (caller ensures `offset + 4 <= length`). */
+export function readU32LE(buf: Uint8Array, offset: number): number {
+  return new DataView(buf.buffer, buf.byteOffset, buf.byteLength).getUint32(offset, true);
+}
+
 /** Length-prefixed byte string: <u32 len><bytes>. */
 function lstr(bytes: Uint8Array): Uint8Array {
   return concat([u32le(bytes.length), bytes]);

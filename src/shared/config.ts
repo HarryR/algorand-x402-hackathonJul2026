@@ -94,8 +94,6 @@ export const config = {
    */
   qemuKvm: env('LUALAMBDA_QEMU_KVM', '') === '1',
 
-  /** SLIRP gateway the guest dials back to (QEMU user-mode NAT). */
-  slirpGateway: '10.0.2.2',
   /**
    * Per-instance connect-back ports are allocated from this inclusive range on
    * the host loopback; one listener per running VM.

@@ -27,16 +27,31 @@ local thread = require('nt.thread')  -- spawns the harderr daemon below
 -- user-mode networking is the slirp router (10.0.2.2) and reaches a
 -- listener on the host's loopback.  PORT is the host-side stub's port.
 --
--- The port is supplied on the init command line's post-"--" tail
--- (boot.sh --kernel-opts "-- main <port>"); launch.lua rebases the global
--- arg table so we read it at arg[1], with the chunk vararg (...) as a
--- secondary source.  Fall back to 4444 when no port was given (interactive
--- boots, or a profile that bakes a fixed port).
-local PORT          = tonumber((arg and arg[1]) or (...)) or 4444
+-- The connect-back params are supplied on the init command line's post-"--"
+-- tail (boot.sh --kernel-opts "-- main <port> <token>"); launch.lua rebases
+-- the global arg table so we read port at arg[1], with the chunk vararg (...)
+-- as a secondary source.  Fall back to 4444 when no port given.
+--
+--   arg[2] TOKEN  per-instance secret we MUST send first so the host releases
+--                 the stager only to us.  All guests share a SLIRP->loopback
+--                 path, so the port alone is not proof of identity.
+local PORT       = tonumber((arg and arg[1]) or (...)) or 4444
+local TOKEN      = (arg and arg[2]) or ""
 local CONNECT_WAIT  = 3      -- per-attempt connect timeout (s)
 local RETRY_WAIT    = 3      -- pause between failed connect attempts (s)
 local CHUNK_TIMEOUT = 30     -- read timeout while pulling a chunk (s)
 local MAX_CHUNK     = 64 * 1024 * 1024
+
+-- Send a u32-LE length-prefixed frame (used for the auth token handshake).
+local function send_frame(sock, s)
+    local n = #s
+    local hdr = string.char(
+        n % 256,
+        math.floor(n / 256) % 256,
+        math.floor(n / 65536) % 256,
+        math.floor(n / 16777216) % 256)
+    afd.send(sock, hdr .. s)
+end
 
 local function sleep(secs)
     ke.NtDelayExecution(false, ke.timeout(secs))
@@ -183,6 +198,7 @@ if not lease then
     while true do end
 end
 
+-- Dial the DHCP-learned gateway (slirp 10.0.2.2 -> host loopback).
 local host = lease.gateway_str or "10.0.2.2"
 print(string.format("AGENT: dhcp ok ip=%s gw=%s — dialling %s:%d",
     lease.address_str, tostring(lease.gateway_str), host, PORT))
@@ -204,7 +220,9 @@ while true do
     if ok then
         n = n + 1
         print(string.format("AGENT: connection #%d to %s:%d", n, host, PORT))
-        pcall(afd.send, sock, "MicroNT agent ready\n")
+        -- Authenticate FIRST: present the per-instance token so the host releases
+        -- the stager (which carries this tenant's module + args) only to us.
+        pcall(send_frame, sock, TOKEN)
         pcall(serve, sock)
         pcall(function() sock:close() end)
     else

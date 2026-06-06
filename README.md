@@ -7,6 +7,8 @@ LuaJIT.
 
 See [OUTLINE.md](./OUTLINE.md) for the full design, rationale, and build plan.
 
+See [hackathon presentation](https://docs.google.com/presentation/d/1P8DxG34sZoJQHEu3WijpxBsueuJsHZWx77lmKm18Cv4/edit?usp=sharing)
+
 ## Status
 
 **Working end-to-end on Algorand testnet.** A paid `invoke` has run for real: the
@@ -110,6 +112,16 @@ orchestrator runs free. `--network testnet|mainnet` (default testnet) selects th
 USDC ASA + CAIP-2 bundle. Re-invoking the same inputs returns `409` (no double
 charge). The payer key lives at `~/.config/lualambda/wallet.json` (or
 `LUALAMBDA_MNEMONIC`); testnet throwaway keys only.
+
+## Guest isolation
+
+Guests share QEMU's SLIRP user-mode network, where every VM's `10.0.2.2` maps to
+the host loopback — so without care one guest could reach another's connect-back
+port (leaking that tenant's code/args or poisoning its result). The guard is a
+**per-instance connect-back token**: each VM gets a fresh secret on its (private)
+kernel cmdline, and the host releases the stager — and accepts a result — only
+after the connecting guest presents that token. A different guest reaching the
+port gets nothing and can't poison it.
 
 ## Layout
 

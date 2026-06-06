@@ -39,6 +39,8 @@ export interface RunLocalOptions {
   profileName: string;
   /** Optional explicit id (positional). Omitted → derived from the inputs. */
   id?: string;
+  /** Optional live serial sink — forwarded to launch (local-test --console). */
+  onSerial?: (chunk: Uint8Array) => void;
 }
 
 export interface RunLocalResult {
@@ -90,6 +92,7 @@ export async function buildLaunchPlan(opts: RunLocalOptions): Promise<LaunchRequ
  */
 export async function runLocal(opts: RunLocalOptions): Promise<RunLocalResult> {
   const req = await buildLaunchPlan(opts);
+  req.onSerial = opts.onSerial;
   const res: LaunchResult = await launch(req);
   return {
     id: req.id,
