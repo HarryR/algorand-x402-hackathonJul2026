@@ -69,6 +69,32 @@ export function signerKeyBase64(): string {
   return Buffer.from(loadAccount().sk).toString('base64');
 }
 
+export interface WalletSecrets {
+  address: string;
+  /** 25-word Algorand mnemonic — what most wallets (Pera, Defly) import. */
+  mnemonic: string;
+  /** Base64 of the 64-byte secret key (32 seed + 32 pub). */
+  secretKeyBase64: string;
+  /** Hex of the same 64-byte secret key. */
+  secretKeyHex: string;
+}
+
+/**
+ * Export the active key in every common form so it can be imported elsewhere.
+ * Returns SECRET material — callers must treat the result accordingly (the CLI
+ * warns before printing). Sources the key via the same precedence as everything
+ * else (LUALAMBDA_MNEMONIC wins, else the wallet file).
+ */
+export function exportSecrets(): WalletSecrets {
+  const account = loadAccount();
+  return {
+    address: account.addr.toString(),
+    mnemonic: algosdk.secretKeyToMnemonic(account.sk),
+    secretKeyBase64: Buffer.from(account.sk).toString('base64'),
+    secretKeyHex: Buffer.from(account.sk).toString('hex'),
+  };
+}
+
 function writeWalletFile(account: algosdk.Account): void {
   const file: WalletFile = {
     version: WALLET_VERSION,

@@ -8,7 +8,7 @@
  *   lualambda output <id>
  *   lualambda profiles
  *   lualambda discover
- *   lualambda wallet create|status|address|qr|opt-in|import
+ *   lualambda wallet create|status|address|qr|export|opt-in|import
  *
  * The idempotency id is opaque and client-chosen: pass it positionally (a hash
  * or a nametag), or omit it and the CLI derives a deterministic id from the
@@ -47,7 +47,8 @@ Usage:
   lualambda wallet status                # address + ALGO/USDC balances
   lualambda wallet address               # address + QR
   lualambda wallet qr                    # address + QR (for funding)
-  lualambda wallet opt-in                # opt into testnet USDC (needs ALGO)
+  lualambda wallet export                # print mnemonic + secret key (SECRET!)
+  lualambda wallet opt-in                # opt into USDC for the active network (needs ALGO)
 
 The id is opaque and client-chosen (a hash or a nametag). Omit it on invoke to
 derive a deterministic id from the packages + module + args.
@@ -253,6 +254,18 @@ async function cmdWallet(positionals: string[], values: Record<string, unknown>)
       console.log(await addressQr(addr));
       return;
     }
+    case 'export': {
+      const s = wallet.exportSecrets();
+      // Secrets go to stdout (so they can be piped); the warning goes to stderr.
+      console.error(
+        '⚠ SECRET KEY MATERIAL — anyone with this controls the wallet. Never share or log it.',
+      );
+      console.log(`address:     ${s.address}`);
+      console.log(`mnemonic:    ${s.mnemonic}`);
+      console.log(`sk (base64): ${s.secretKeyBase64}`);
+      console.log(`sk (hex):    ${s.secretKeyHex}`);
+      return;
+    }
     case 'status': {
       const b = await wallet.getBalances();
       console.log(`address: ${wallet.address()}`);
@@ -270,7 +283,7 @@ async function cmdWallet(positionals: string[], values: Record<string, unknown>)
       return;
     }
     default:
-      die(`wallet: unknown subcommand "${sub}" (create|import|address|qr|status|opt-in)`);
+      die(`wallet: unknown subcommand "${sub}" (create|import|address|qr|status|export|opt-in)`);
   }
 }
 
