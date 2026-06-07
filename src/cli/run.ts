@@ -28,8 +28,11 @@ import { deriveId } from '@/shared/idempotency.ts';
 import { assertValidRequire, ValidationError } from '@/shared/validate.ts';
 import { baseUnitsToUsd } from '@/shared/units.ts';
 import { resolvePackage, luaModulePackage, type PackageZip } from './zip.ts';
-import { runLocal } from '@/orchestrator/local.ts';
+import { runLocal, runLocalSession } from '@/orchestrator/local.ts';
+import { createSession } from '@/orchestrator/sessions.ts';
+import type { SessionStart } from '@/shared/protocol.ts';
 import { payingFetch, type PayTimings } from './payment.ts';
+import { attachLocalSession, attachWebSocket, toWsUrl } from './serial.ts';
 import * as wallet from './wallet.ts';
 import { addressQr } from './qr.ts';
 
@@ -38,9 +41,12 @@ const USAGE = `lualambda — pay-per-run Lua packages on Algorand (x402)
 Usage:
   lualambda invoke [<id>] [--pkg <dir|zip|file.lua> ...] [--require <module>]
                    [--arg <v> ...] [--profile nano|small|med] [--max-price <usd>]
-                   [--verbose] [--local-test [--keep] [--console]]
+                   [--verbose] [--attach] [--local-test [--keep] [--console]]
                    (prints only the result by default; -v/--verbose adds the id,
                     settlement receipt, and timing)
+                   (--attach keeps the VM alive after running and drops you into a
+                    Lua REPL on its serial; no --pkg = a bare REPL. Ctrl-] detaches.
+                    Pairs with --local-test for a free local shell.)
                    (with no --pkg, reads a Lua script from stdin:
                       lualambda invoke < script.lua
                     a directory is zipped in-process; a .zip is uploaded verbatim;
@@ -50,6 +56,7 @@ Usage:
                     no payment, no wallet; needs qemu-system-x86_64 on PATH.
                     --keep retains the instance dir + boot.log for inspection;
                     --console streams the guest serial console live to stderr)
+  lualambda attach <id>                            # attach a terminal to a running session
   lualambda serve [--port <n>] [--pay-to <addr>]   # run the orchestrator (HTTP API)
   lualambda status <id>
   lualambda output <id>
@@ -193,6 +200,9 @@ async function cmdInvoke(positionals: string[], values: Record<string, unknown>)
   const profile = String(values.profile ?? DEFAULT_PROFILE);
   const maxPrice = values['max-price'] ? Number(values['max-price']) : undefined;
 
+  // Interactive: run (optionally a module), keep the VM alive, drop into a shell.
+  if (values.attach) return cmdInvokeAttach(positionals, values, args, profile, maxPrice);
+
   const { pkgs, requireMod } = await resolveInvokeInputs(values);
 
   // Local dry-run: boot the package in a local QEMU VM via the shared core, no
@@ -323,6 +333,92 @@ async function printBootLogTail(path: string, n = 30): Promise<void> {
   console.error('--- end boot.log ---');
 }
 
+/** Short random hex id for ad-hoc interactive sessions (`sh-…`, FS/path-safe). */
+function randomHex(nBytes: number): string {
+  const b = new Uint8Array(nBytes);
+  crypto.getRandomValues(b);
+  return [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * `invoke --attach`: boot a VM, optionally run a module, then keep it alive and
+ * bridge your terminal to a Lua REPL on its serial. `--local-test` runs the VM
+ * locally (free, no server); otherwise it's a paid session on the orchestrator.
+ * With no `--pkg`, you get a bare REPL (no stdin is read — you're going
+ * interactive). Ctrl-] detaches.
+ */
+async function cmdInvokeAttach(
+  positionals: string[],
+  values: Record<string, unknown>,
+  args: string[],
+  profileName: string,
+  maxPrice: number | undefined,
+): Promise<void> {
+  // Only run a module when a package is given; otherwise a bare REPL.
+  let pkgs: PackageZip[] = [];
+  let requireMod = '';
+  if (asArray(values.pkg).length) ({ pkgs, requireMod } = await resolveInvokeInputs(values));
+  const id = positionals[0] ?? `sh-${randomHex(8)}`;
+
+  if (values['local-test']) {
+    const sess = await runLocalSession({
+      packages: pkgs.map((p) => ({ name: p.name, bytes: p.bytes })),
+      require: requireMod,
+      args,
+      profileName,
+      id,
+    });
+    const session = createSession(sess.id, sess.channel, {
+      maxWallMs: sess.maxWallMs,
+      maxOutputBytes: sess.maxOutputBytes,
+    });
+    console.error(`attached to local VM "${sess.id}" — Ctrl-] to detach (stops it)`);
+    await attachLocalSession(session);
+    await sess.cleanup();
+    return;
+  }
+
+  // Remote: pay for + start a session, then attach over the serial WebSocket.
+  const form = new FormData();
+  for (const p of pkgs) {
+    form.append(
+      'package',
+      new Blob([new Uint8Array(p.bytes)], { type: 'application/zip' }),
+      p.name,
+    );
+  }
+  if (requireMod) form.set('spec', JSON.stringify({ require: requireMod, args }));
+
+  const doFetch = payingFetch(maxPrice, {});
+  let res: Response;
+  try {
+    res = await doFetch(
+      `${config.orchestratorUrl}/invoke/${encodeURIComponent(id)}/${profileName}?mode=session`,
+      { method: 'POST', body: form },
+    );
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    die(/no wallet/i.test(msg) ? msg : `payment failed: ${msg}`);
+  }
+  if (res.status === 409) {
+    die(`id "${id}" already has a live session; join it with: lualambda attach ${id}`);
+  }
+  if (!res.ok) die(`session start failed (${res.status}): ${await res.text()}`);
+  const info = (await res.json()) as SessionStart;
+  console.error(`session "${id}" up — Ctrl-] to detach (it keeps running)`);
+  await attachWebSocket(toWsUrl(config.orchestratorUrl, info.serial));
+}
+
+/** `attach <id>`: bridge your terminal to an already-running session's serial. */
+async function cmdAttach(positionals: string[]): Promise<void> {
+  const id = positionals[0];
+  if (!id) die('attach: missing <id>');
+  console.error(`attaching to "${id}" — Ctrl-] to detach`);
+  await attachWebSocket(
+    toWsUrl(config.orchestratorUrl, `/invoke/${encodeURIComponent(id)}/serial`),
+  );
+}
+
 async function cmdStatus(positionals: string[]): Promise<void> {
   const id = positionals[0];
   if (!id) die('status: missing <id>');
@@ -446,6 +542,7 @@ export async function run(): Promise<void> {
       'local-test': { type: 'boolean' }, // run the VM locally; no server/payment
       keep: { type: 'boolean' }, // keep the local-test instance dir for inspection
       console: { type: 'boolean' }, // stream the guest serial console live (local-test)
+      attach: { type: 'boolean' }, // keep the VM alive and drop into a serial shell
       verbose: { type: 'boolean', short: 'v' }, // print id + metering + receipt, not just the result
       force: { type: 'boolean' },
       mnemonic: { type: 'string' },
@@ -457,6 +554,8 @@ export async function run(): Promise<void> {
   switch (command) {
     case 'invoke':
       return cmdInvoke(positionals, values);
+    case 'attach':
+      return cmdAttach(positionals);
     case 'status':
       return cmdStatus(positionals);
     case 'output':

@@ -16,18 +16,28 @@
 import { RESULT_BEGIN, RESULT_END } from '@/shared/protocol.ts';
 
 /**
- * A no-op "keepalive" stager for interactive sessions. The guest agent dials back
- * and runs whatever chunk we hand it; for a session there is no module to run —
- * the serial getty drives the console independently — so we hand it a chunk that
- * simply parks forever. This keeps the guest's connect-back loop satisfied (one
- * occupied socket) instead of spinning + printing reconnect noise onto the very
- * serial console the user is attached to. The host abandons this socket on
- * teardown (its Bun.listen is aborted with the session).
+ * Stager for an interactive session: hand the serial console to an interactive
+ * Lua REPL (`lua.exe -i`) under nt.term's cooked line discipline (echo + editing
+ * + CR→LF), which is exactly what an attached terminal drives. `run.cooked` opens
+ * the serial console itself and runs the reactor until the child exits, so this
+ * chunk blocks for the life of the VM — the host abandons the connect-back socket
+ * on teardown (its Bun.listen is aborted with the session).
+ *
+ * `requireModule` (optional): run that module first, so "run your code, then drop
+ * into a shell" — its output/side effects land on the console before the prompt.
+ * The module stays loaded in package.loaded, so the REPL can re-require it.
  */
-export function buildKeepaliveStager(): string {
+export function buildReplStager(requireModule?: string, args: string[] = []): string {
+  const exe = luaString('\\SystemRoot\\System32\\lua.exe');
+  const cmdline = luaString('"lua.exe" -i');
+  const runModule = requireModule
+    ? `pcall(function()
+  local h = require(${luaString(requireModule)})
+  if type(h) == 'function' then h(${luaArgsTable(args)}) end
+end)\n`
+    : '';
   return `
-local ke = require('nt.dll.ke')
-while true do ke.NtDelayExecution(false, ke.timeout(3600)) end
+${runModule}require('nt.term.run').cooked{ exe = ${exe}, cmdline = ${cmdline} }
 `;
 }
 

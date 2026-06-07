@@ -42,6 +42,30 @@ echo 'return function(a) return "hi "..(a[1] or "there") end' \
   | ./lualambda invoke --arg Algorand --local-test
 ```
 
+## Drop into a shell
+
+Add `--attach` and the VM stays alive after running — you land in a Lua REPL on
+its serial console and can poke around like it's a tiny computer, because it is
+one:
+
+```bash
+lualambda invoke --local-test --attach            # a bare Lua REPL in a local microVM
+lualambda invoke --local-test --attach --pkg ./mylib   # ...with your package there to require()
+```
+
+```
+LuaJIT 2.1 -- Copyright (C) 2005-2026 Mike Pall. https://luajit.org/
+> require('nt.dll.ps').getpid()
+1
+> 1 + 1
+2
+```
+
+Drop `--local-test` to run it as a paid session on an orchestrator instead. Those
+are multi-attach: `lualambda attach <id>` joins a running one, so several people
+can share the same terminal. `Ctrl-]` detaches. The session ends when its
+wall-clock or output cap is hit (you're renting CPU, after all).
+
 ## One binary, three roles
 
 The same executable is the client, the wallet, and the orchestrator. The first

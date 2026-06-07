@@ -24,7 +24,13 @@ import { deriveId } from '@/shared/idempotency.ts';
 import { assertValidId, assertValidPackageName, assertValidRequire } from '@/shared/validate.ts';
 import { checkStoredOnly } from '@/shared/zipcheck.ts';
 import { savePackage, packageFile } from './store.ts';
-import { launch, type LaunchRequest, type LaunchResult } from './vm.ts';
+import {
+  launch,
+  launchSession,
+  type LaunchRequest,
+  type LaunchResult,
+  type LaunchSessionResult,
+} from './vm.ts';
 
 /** A package the client already has in memory (from src/cli/zip.ts resolvePackage). */
 export interface LocalPackage {
@@ -58,7 +64,7 @@ export interface RunLocalResult {
  * the resolved id.
  */
 export async function buildLaunchPlan(opts: RunLocalOptions): Promise<LaunchRequest> {
-  assertValidRequire(opts.require);
+  if (opts.require) assertValidRequire(opts.require); // empty = bare REPL session (no module)
   const profile = getProfile(opts.profileName); // throws on bad name
 
   const mounts = [];
@@ -100,5 +106,33 @@ export async function runLocal(opts: RunLocalOptions): Promise<RunLocalResult> {
     vmWallMs: res.vmWallMs,
     instanceDir: res.instanceDir,
     cleanup: res.cleanup,
+  };
+}
+
+export interface RunLocalSessionResult {
+  id: string;
+  /** The VM's serial line as a live channel — drive it via a sessions.ts Session. */
+  channel: LaunchSessionResult['channel'];
+  cleanup: () => Promise<void>;
+  /** Profile-derived hard caps for the Session (wall-clock + output bytes). */
+  maxWallMs: number;
+  maxOutputBytes: number;
+}
+
+/**
+ * Boot a local guest VM as an interactive session (for `invoke --local-test
+ * --attach`): same validate/store/id path as `runLocal`, but keeps the VM alive
+ * and hands back its serial channel + the profile caps, so the CLI can wrap it in
+ * a Session and bridge the local terminal. `require` may be empty for a bare REPL.
+ */
+export async function runLocalSession(opts: RunLocalOptions): Promise<RunLocalSessionResult> {
+  const req = await buildLaunchPlan(opts);
+  const res = await launchSession(req);
+  return {
+    id: req.id,
+    channel: res.channel,
+    cleanup: res.cleanup,
+    maxWallMs: req.profile.maxWallMs,
+    maxOutputBytes: req.profile.maxOutputBytes,
   };
 }

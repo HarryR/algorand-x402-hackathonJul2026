@@ -24,7 +24,7 @@ import { type ResourceProfile } from '@/shared/profiles.ts';
 import { allocatePort, releasePort } from './ports.ts';
 import { kernelPath } from './artifacts.ts';
 import { prepareInstance } from './instance.ts';
-import { buildStager, buildKeepaliveStager } from './stager.ts';
+import { buildStager, buildReplStager } from './stager.ts';
 import { frameChunk, extractFramedResult, concat, readU32LE } from './record-protocol.ts';
 import type { SerialChannel } from './sessions.ts';
 
@@ -405,10 +405,16 @@ export async function launchSession(req: LaunchRequest): Promise<LaunchSessionRe
     { stdout: 'pipe', stderr: 'pipe', stdin: 'pipe' },
   );
 
-  // Park the guest's connect-back loop on a keepalive chunk; abandon the listener
-  // when the session ends. Fire-and-forget — it never resolves to a result.
+  // Hand the guest an interactive Lua REPL on the serial (optionally running the
+  // requested module first). Fire-and-forget — run.cooked blocks for the life of
+  // the VM, so this never resolves to a result; abandon the listener on teardown.
   const ac = new AbortController();
-  void runProtocol(port, buildKeepaliveStager(), token, ac.signal).catch(() => {});
+  void runProtocol(
+    port,
+    buildReplStager(req.input.require, req.input.args),
+    token,
+    ac.signal,
+  ).catch(() => {});
 
   // Serial OUT → the Session's sink. Buffer until it subscribes so the boot
   // banner isn't lost in the gap between spawn and attach. QEMU's own diagnostics

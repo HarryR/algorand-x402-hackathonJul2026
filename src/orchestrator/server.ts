@@ -141,24 +141,34 @@ async function handlePay(req: Request, id: string, profileName: string): Promise
     return challenge(profile, new URL(req.url).pathname);
   }
 
-  // Parse the multipart body: one or more "package" zips + a JSON "spec" field.
+  // A session (?mode=session) keeps the VM alive as an interactive serial shell;
+  // it needs neither a module nor packages (a bare REPL is valid), so spec and
+  // packages are optional in that mode. A one-shot invoke requires both.
+  const sessionMode = new URL(req.url).searchParams.get('mode') === 'session';
+
+  // Parse the multipart body: zero or more "package" zips + a JSON "spec" field.
   const form = await req.formData();
   const specRaw = form.get('spec');
-  if (typeof specRaw !== 'string') return err('expected a JSON "spec" field { require, args }');
-  let spec: InvokeSpec;
-  try {
-    spec = JSON.parse(specRaw) as InvokeSpec;
-  } catch {
-    return err('"spec" is not valid JSON');
+  let spec: InvokeSpec = { require: '', args: [] };
+  if (typeof specRaw === 'string') {
+    try {
+      spec = JSON.parse(specRaw) as InvokeSpec;
+    } catch {
+      return err('"spec" is not valid JSON');
+    }
+  } else if (!sessionMode) {
+    return err('expected a JSON "spec" field { require, args }');
   }
-  if (!spec.require || typeof spec.require !== 'string') {
+  if (spec.require) {
+    if (typeof spec.require !== 'string') return err('spec.require must be a dotted module string');
+    assertValidRequire(spec.require); // untrusted: drives require() in the guest
+  } else if (!sessionMode) {
     return err('spec.require must be a dotted module string');
   }
-  assertValidRequire(spec.require); // untrusted: drives require() in the guest
   const args = Array.isArray(spec.args) ? spec.args.map(String) : [];
 
   const files = form.getAll('package').filter((f) => typeof f !== 'string');
-  if (files.length === 0) return err('expected at least one "package" zip');
+  if (files.length === 0 && !sessionMode) return err('expected at least one "package" zip');
   if (files.length > config.maxPackagesPerInvoke) {
     return err(`too many packages: ${files.length} > ${config.maxPackagesPerInvoke} max`, 413);
   }
@@ -223,7 +233,7 @@ async function handlePay(req: Request, id: string, profileName: string): Promise
   // instead of running to a framed result. The client attaches over WS at
   // /invoke/:id/serial. The session hard-caps at the profile's wall-clock; the
   // invocation expires in lockstep so a re-pay is rejected until then.
-  if (new URL(req.url).searchParams.get('mode') === 'session') {
+  if (sessionMode) {
     const sess = await launchSession({
       id,
       packages: packages.map((p) => ({ name: p.name, path: packageFile(p.hash) })),
