@@ -24,8 +24,9 @@ import { type ResourceProfile } from '@/shared/profiles.ts';
 import { allocatePort, releasePort } from './ports.ts';
 import { kernelPath } from './artifacts.ts';
 import { prepareInstance } from './instance.ts';
-import { buildStager } from './stager.ts';
+import { buildStager, buildKeepaliveStager } from './stager.ts';
 import { frameChunk, extractFramedResult, concat, readU32LE } from './record-protocol.ts';
+import type { SerialChannel } from './sessions.ts';
 
 /** A package to bake into the guest pkg dir: filename + path to its bytes. */
 export interface PackageMount {
@@ -132,7 +133,10 @@ function kernelCmdline(port: number, token: string): string {
 function newConnectToken(): string {
   const b = new Uint8Array(24);
   crypto.getRandomValues(b);
-  return [...b].map((x) => x.toString(16).padStart(2, '0')).join('').toUpperCase();
+  return [...b]
+    .map((x) => x.toString(16).padStart(2, '0'))
+    .join('')
+    .toUpperCase();
 }
 
 /** Constant-time byte compare (avoid leaking the token via early-exit timing). */
@@ -268,20 +272,35 @@ export function runProtocol(
   });
 }
 
-/** Launch a guest VM and return its result. */
-export async function launch(req: LaunchRequest): Promise<LaunchResult> {
-  // Materialize the kernel to a real on-disk path (embedded vmlinux is extracted
-  // once and memoized; LUALAMBDA_KERNEL overrides). Throws if it can't be written.
-  const kernelImage = await kernelPath();
+interface BootPrep {
+  kernelImage: string;
+  port: number;
+  token: string;
+  instance: Awaited<ReturnType<typeof prepareInstance>>;
+  bootLogPath: string;
+}
 
-  const startedAt = Date.now();
+/**
+ * Shared pre-spawn setup for both launch modes: materialize the kernel, allocate
+ * the connect-back port + per-instance token, and prepare the instance dir
+ * (initrd + data disk). The boot log lives inside the retained instance dir.
+ */
+async function prepareBoot(req: LaunchRequest): Promise<BootPrep> {
+  // The embedded vmlinux is extracted once and memoized; LUALAMBDA_KERNEL
+  // overrides. Throws if it can't be written.
+  const kernelImage = await kernelPath();
   const port = await allocatePort();
   // Per-instance secret the guest must present before we release the stager or
   // accept a result — defeats cross-guest poisoning over the shared loopback.
   const token = newConnectToken();
   const instance = await prepareInstance(req.id, req.packages, req.profile);
-  // Boot log lives inside the (retained) instance dir.
-  const bootLogPath = join(instance.dir, 'boot.log');
+  return { kernelImage, port, token, instance, bootLogPath: join(instance.dir, 'boot.log') };
+}
+
+/** Launch a guest VM and return its result. */
+export async function launch(req: LaunchRequest): Promise<LaunchResult> {
+  const { kernelImage, port, token, instance, bootLogPath } = await prepareBoot(req);
+  const startedAt = Date.now();
   const stager = buildStager(req.input.require, req.input.args);
 
   const bootLogParts: Uint8Array[] = [];
@@ -349,4 +368,103 @@ export async function launch(req: LaunchRequest): Promise<LaunchResult> {
     await Bun.write(bootLogPath, concat(bootLogParts)).catch(() => {});
     releasePort(port);
   }
+}
+
+export interface LaunchSessionResult {
+  /** The VM's serial line as a live bidirectional byte channel (for sessions.ts). */
+  channel: SerialChannel;
+  /** Retained instance dir (initrd + data.img + boot.log). */
+  instanceDir: string;
+  /** Best-effort teardown of the instance dir; the caller decides when. */
+  cleanup: () => Promise<void>;
+}
+
+/**
+ * Boot a guest VM for an INTERACTIVE session: same image/packages as `launch`,
+ * but instead of running a stager to a framed result and killing the VM, we keep
+ * it alive and hand its serial line back as a {@link SerialChannel}. The caller
+ * (sessions.ts) owns lifetime — wall-clock + output caps, attach/teardown.
+ *
+ * Differences from `launch`: serial is BIDIRECTIONAL (QEMU stdin piped, so client
+ * keystrokes reach the guest's serial RX; `-monitor none` keeps stdio uncontended),
+ * and the connect-back gets a keepalive stager so the guest's dial-back loop parks
+ * quietly instead of spamming the very console the user is attached to.
+ */
+export async function launchSession(req: LaunchRequest): Promise<LaunchSessionResult> {
+  const { kernelImage, port, token, instance, bootLogPath } = await prepareBoot(req);
+
+  const proc = Bun.spawn(
+    [
+      config.qemuBinary,
+      ...qemuArgs(kernelImage, instance.initrdPath, instance.dataImagePath, req.profile),
+      '-monitor',
+      'none',
+      '-append',
+      kernelCmdline(port, token),
+    ],
+    { stdout: 'pipe', stderr: 'pipe', stdin: 'pipe' },
+  );
+
+  // Park the guest's connect-back loop on a keepalive chunk; abandon the listener
+  // when the session ends. Fire-and-forget — it never resolves to a result.
+  const ac = new AbortController();
+  void runProtocol(port, buildKeepaliveStager(), token, ac.signal).catch(() => {});
+
+  // Serial OUT → the Session's sink. Buffer until it subscribes so the boot
+  // banner isn't lost in the gap between spawn and attach. QEMU's own diagnostics
+  // (stderr) go only to the boot log, not the live console.
+  let sink: ((chunk: Uint8Array) => void) | undefined;
+  const pending: Uint8Array[] = [];
+  const stderrParts: Uint8Array[] = [];
+  const drainOut = async () => {
+    for await (const part of proc.stdout as ReadableStream<Uint8Array>) {
+      if (sink) sink(part);
+      else pending.push(part);
+    }
+  };
+  const drainErr = async () => {
+    for await (const part of proc.stderr as ReadableStream<Uint8Array>) stderrParts.push(part);
+  };
+  void drainOut();
+  void drainErr();
+
+  // One-shot teardown: abort the keepalive listener, kill QEMU, persist the boot
+  // log, free the port. Runs on explicit kill() and when the VM exits on its own.
+  let toreDown = false;
+  const teardown = async () => {
+    if (toreDown) return;
+    toreDown = true;
+    ac.abort();
+    try {
+      proc.kill();
+    } catch {
+      /* already exited */
+    }
+    await Bun.write(bootLogPath, concat(stderrParts)).catch(() => {});
+    releasePort(port);
+  };
+  void proc.exited.then(teardown).catch(teardown);
+
+  const stdin = proc.stdin as { write(b: Uint8Array): void; flush?(): void };
+  const channel: SerialChannel = {
+    subscribe(onData) {
+      sink = onData;
+      for (const p of pending) onData(p);
+      pending.length = 0;
+    },
+    write(bytes) {
+      try {
+        stdin.write(bytes);
+        stdin.flush?.();
+      } catch {
+        /* VM gone */
+      }
+    },
+    kill() {
+      void teardown();
+    },
+    exited: proc.exited.then(() => {}),
+  };
+
+  return { channel, instanceDir: instance.dir, cleanup: instance.cleanup };
 }

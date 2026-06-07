@@ -30,6 +30,7 @@ import type {
   InvokeError,
   PackageRef,
   SettlementReceipt,
+  SessionStart,
 } from '@/shared/protocol.ts';
 import {
   savePackage,
@@ -39,9 +40,16 @@ import {
   putInvocation,
   type Invocation,
 } from './store.ts';
-import { launch } from './vm.ts';
+import { launch, launchSession } from './vm.ts';
+import { createSession, getSession, type Session } from './sessions.ts';
 import { kernelPath } from './artifacts.ts';
 import { paymentsRequired, hasPaymentHeader, challenge, settle } from './payment.ts';
+
+/** Per-connection state carried on each serial WebSocket. */
+interface SerialWsData {
+  id: string;
+  session?: Session;
+}
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -211,6 +219,39 @@ async function handlePay(req: Request, id: string, profileName: string): Promise
   };
   putInvocation(inv);
 
+  // Session mode: boot the VM and keep it alive as an interactive serial console
+  // instead of running to a framed result. The client attaches over WS at
+  // /invoke/:id/serial. The session hard-caps at the profile's wall-clock; the
+  // invocation expires in lockstep so a re-pay is rejected until then.
+  if (new URL(req.url).searchParams.get('mode') === 'session') {
+    const sess = await launchSession({
+      id,
+      packages: packages.map((p) => ({ name: p.name, path: packageFile(p.hash) })),
+      input: { require: spec.require, args },
+      profile,
+    });
+    createSession(id, sess.channel, {
+      maxWallMs: profile.maxWallMs,
+      maxOutputBytes: profile.maxOutputBytes,
+    });
+    // Reap the instance dir once the VM is gone (cap / output-cap / exit).
+    void sess.channel.exited.then(() => sess.cleanup()).catch(() => {});
+    inv.expiresAtMs = Date.now() + profile.maxWallMs;
+    inv.metering = { vmWallMs: 0, profile: profile.name, settleMs };
+    putInvocation(inv);
+
+    const res = json({
+      ok: true,
+      id,
+      mode: 'session',
+      expiresAt: inv.expiresAtMs,
+      serial: `/invoke/${encodeURIComponent(id)}/serial`,
+      receipt,
+    } satisfies SessionStart);
+    if (paymentResponseHeader) res.headers.set('PAYMENT-RESPONSE', paymentResponseHeader);
+    return res;
+  }
+
   try {
     const { output, vmWallMs } = await launch({
       id,
@@ -243,15 +284,25 @@ async function handlePay(req: Request, id: string, profileName: string): Promise
 
 // --- Dispatch ---------------------------------------------------------------
 
-const server = Bun.serve({
+const server = Bun.serve<SerialWsData>({
   port: config.orchestratorPort,
-  async fetch(req) {
+  async fetch(req, server) {
     const url = new URL(req.url);
     const { pathname } = url;
     try {
       if (req.method === 'GET' && pathname === '/health') return json({ ok: true });
       if (req.method === 'GET' && pathname === '/profiles') return json(PROFILES);
       if (req.method === 'GET' && pathname === '/invoke') return handleDiscovery();
+
+      // Serial console attach — upgrade to a WebSocket. Auth is the id (same trust
+      // model as /output): the session must be live, else open() closes it.
+      const serial = pathname.match(/^\/invoke\/([^/]+)\/serial$/);
+      if (req.method === 'GET' && serial) {
+        const id = decodeURIComponent(serial[1]!);
+        assertValidId(id);
+        if (server.upgrade(req, { data: { id } })) return undefined;
+        return err('expected a WebSocket upgrade', 426);
+      }
 
       const output = pathname.match(/^\/invoke\/([^/]+)\/output$/);
       if (req.method === 'GET' && output) {
@@ -270,6 +321,27 @@ const server = Bun.serve({
       // Bad request — ValidationError (bad id/name/require), getProfile, JSON, etc.
       return err(e instanceof Error ? e.message : String(e), 400);
     }
+  },
+
+  // Serial console: one WebSocket per attachment; many may share a session id
+  // (multi-attach). Output is broadcast to all; any client's bytes feed serial in.
+  websocket: {
+    open(ws) {
+      const session = getSession(ws.data.id);
+      if (!session) {
+        ws.close(1011, 'no live session for that id');
+        return;
+      }
+      ws.data.session = session;
+      session.attach(ws); // replays scrollback, then live-streams
+    },
+    message(ws, message) {
+      const bytes = typeof message === 'string' ? new TextEncoder().encode(message) : message;
+      ws.data.session?.input(new Uint8Array(bytes));
+    },
+    close(ws) {
+      ws.data.session?.detach(ws);
+    },
   },
 });
 

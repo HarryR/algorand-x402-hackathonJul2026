@@ -90,6 +90,24 @@ export interface InvokeOutput {
 }
 
 /**
+ * Response to `POST /invoke/:id/:profile?mode=session` — instead of running a
+ * module to a result, the VM stays alive as an interactive serial session. The
+ * client then opens a WebSocket to `serial` to attach (multi-attach allowed). The
+ * session hard-caps at `expiresAt` (wall-clock) or on the profile's output cap.
+ */
+export interface SessionStart {
+  ok: true;
+  id: IdempotencyId;
+  mode: 'session';
+  /** Epoch ms at which the session is hard-killed (wall-clock rental cap). */
+  expiresAt: number;
+  /** Relative path to open a WebSocket against for the serial console. */
+  serial: string;
+  /** Settlement receipt, when payments are enabled. */
+  receipt?: SettlementReceipt;
+}
+
+/**
  * Discovery document — `GET /invoke`. Agent-accessible description of the
  * available profiles, their prices, and the URL scheme. A small MCP endpoint
  * will surface this in the future.

@@ -15,6 +15,22 @@
 
 import { RESULT_BEGIN, RESULT_END } from '@/shared/protocol.ts';
 
+/**
+ * A no-op "keepalive" stager for interactive sessions. The guest agent dials back
+ * and runs whatever chunk we hand it; for a session there is no module to run —
+ * the serial getty drives the console independently — so we hand it a chunk that
+ * simply parks forever. This keeps the guest's connect-back loop satisfied (one
+ * occupied socket) instead of spinning + printing reconnect noise onto the very
+ * serial console the user is attached to. The host abandons this socket on
+ * teardown (its Bun.listen is aborted with the session).
+ */
+export function buildKeepaliveStager(): string {
+  return `
+local ke = require('nt.dll.ke')
+while true do ke.NtDelayExecution(false, ke.timeout(3600)) end
+`;
+}
+
 /** Escape a string for embedding as a Lua double-quoted literal. */
 function luaString(s: string): string {
   let out = '"';
