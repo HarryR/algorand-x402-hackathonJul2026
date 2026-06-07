@@ -57,7 +57,7 @@ lualambda invoke --local-test --attach --pkg ./mylib   # ...with your package th
 LuaJIT 2.1 -- Copyright (C) 2005-2026 Mike Pall. https://luajit.org/
 > require('nt.dll.ps').getpid()
 1
-> 1 + 1
+> print(1 + 1)
 2
 ```
 

@@ -36,8 +36,20 @@ export function buildReplStager(requireModule?: string, args: string[] = []): st
   if type(h) == 'function' then h(${luaArgsTable(args)}) end
 end)\n`
     : '';
+  // When the REPL exits (Ctrl-D / os.exit), power the VM off so the session ends
+  // and QEMU exits — otherwise the host would wait out the wall-clock cap. power_off
+  // needs SeShutdownPrivilege enabled; reboot is the fallback (QEMU has -no-reboot,
+  // so a reset makes it exit too).
   return `
 ${runModule}require('nt.term.run').cooked{ exe = ${exe}, cmdline = ${cmdline} }
+pcall(function()
+  local se  = require('nt.dll.se')
+  local sys = require('nt.dll.sys')
+  se.enable_privileges(se.open_process_token(), { 'SeShutdownPrivilege' })
+  if not pcall(sys.NtShutdownSystem, 'power_off') then
+    pcall(sys.NtShutdownSystem, 'reboot')
+  end
+end)
 `;
 }
 
