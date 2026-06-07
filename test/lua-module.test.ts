@@ -17,11 +17,13 @@ test('wrapLuaHandler yields a function(args) module with the source verbatim', (
 
 test('luaModulePackage builds a STORED <module>.zip with <module>/init.lua', () => {
   const pkg = luaModulePackage('return { ok = true }');
-  expect(pkg.name).toBe('main.zip');
+  // Default is "app", NOT "main": `main` is the guest's own connect-back agent
+  // (pkg/main.lua), so require('main') would re-run the agent, not user code.
+  expect(pkg.name).toBe('app.zip');
   expect(checkStoredOnly(pkg.bytes).ok).toBe(true);
 
   const entries = readStoredZip(pkg.bytes);
-  expect(entries.map((e) => e.path)).toEqual(['main/init.lua']);
+  expect(entries.map((e) => e.path)).toEqual(['app/init.lua']);
   expect(dec.decode(entries[0]!.data)).toBe(wrapLuaHandler('return { ok = true }'));
 });
 

@@ -38,7 +38,9 @@ const USAGE = `lualambda — pay-per-run Lua packages on Algorand (x402)
 Usage:
   lualambda invoke [<id>] [--pkg <dir|zip|file.lua> ...] [--require <module>]
                    [--arg <v> ...] [--profile nano|small|med] [--max-price <usd>]
-                   [--local-test [--keep] [--console]]
+                   [--verbose] [--local-test [--keep] [--console]]
+                   (prints only the result by default; -v/--verbose adds the id,
+                    settlement receipt, and timing)
                    (with no --pkg, reads a Lua script from stdin:
                       lualambda invoke < script.lua
                     a directory is zipped in-process; a .zip is uploaded verbatim;
@@ -84,10 +86,20 @@ function asArray(v: unknown): string[] {
   return Array.isArray(v) ? v.map(String) : v != null ? [String(v)] : [];
 }
 
+/**
+ * Top-level modules the guest ships as loose `pkg/*.lua` files. A user entry
+ * module named one of these is SHADOWED by the guest's own file — most notably
+ * `main`, the connect-back agent — so the stager's `require('main')` re-runs the
+ * agent instead of the user's code (two agents fight over the network → no result
+ * → timeout). Reject explicit collisions; remap inferred ones to SAFE_MODULE.
+ */
+const RESERVED_MODULES = new Set(['main', 'io', 'os']);
+const SAFE_MODULE = 'app';
+
 /** Coerce a string into a valid single-segment Lua module name (for synthetic packages). */
 function sanitizeModuleName(name: string): string {
   const cleaned = name.replace(/[^A-Za-z0-9_]/g, '_');
-  if (!cleaned) return 'main';
+  if (!cleaned) return SAFE_MODULE;
   return /^[A-Za-z_]/.test(cleaned) ? cleaned : `_${cleaned}`; // require segments can't lead with a digit
 }
 
@@ -124,16 +136,35 @@ async function resolveInvokeInputs(
         );
       }
       source = await Bun.stdin.text();
-      defaultMod = 'main';
+      defaultMod = SAFE_MODULE;
     }
     if (!source.trim()) die('invoke: empty Lua source');
-    const requireMod = values.require ? sanitizeModuleName(String(values.require)) : defaultMod;
+    let requireMod: string;
+    if (values.require) {
+      requireMod = sanitizeModuleName(String(values.require));
+      if (RESERVED_MODULES.has(requireMod)) {
+        die(
+          `invoke: --require "${requireMod}" collides with a built-in guest module; pick another name`,
+        );
+      }
+    } else {
+      // Inferred (stdin default or .lua basename): the package is synthetic, so a
+      // reserved name can be safely remapped rather than failing.
+      requireMod = RESERVED_MODULES.has(defaultMod) ? SAFE_MODULE : defaultMod;
+    }
     return { pkgs: [luaModulePackage(source, requireMod)], requireMod };
   }
 
-  // Packaged mode.
+  // Packaged mode. Unlike raw mode, a real package's name matches its in-zip
+  // directory, so a reserved collision can't be silently remapped — fail clearly.
   const pkgs = await Promise.all(pkgPaths.map((p) => resolvePackage(p)));
-  if (values.require) return { pkgs, requireMod: String(values.require) };
+  if (values.require) {
+    const r = String(values.require);
+    if (RESERVED_MODULES.has(r)) {
+      die(`invoke: --require "${r}" collides with a built-in guest module; pick another name`);
+    }
+    return { pkgs, requireMod: r };
+  }
   if (pkgs.length !== 1) {
     die('invoke: --require <module> is required when multiple --pkg are given\n\n' + USAGE);
   }
@@ -147,6 +178,12 @@ async function resolveInvokeInputs(
       die(`invoke: couldn't infer --require from "${pkgs[0]!.name}" — pass --require <module>`);
     }
     throw e;
+  }
+  if (RESERVED_MODULES.has(candidate)) {
+    die(
+      `invoke: package "${pkgs[0]!.name}" collides with a built-in guest module ("${candidate}"); ` +
+        `rename it or pass --require <module>`,
+    );
   }
   return { pkgs, requireMod: candidate };
 }
@@ -164,6 +201,7 @@ async function cmdInvoke(positionals: string[], values: Record<string, unknown>)
     return cmdInvokeLocal(pkgs, requireMod, args, profile, positionals[0], {
       keep: values.keep === true,
       console: values.console === true,
+      verbose: values.verbose === true,
     });
   }
 
@@ -208,22 +246,26 @@ async function cmdInvoke(positionals: string[], values: Record<string, unknown>)
   if (!res.ok) die(`invoke failed (${res.status}): ${await res.text()}`);
 
   const out = (await res.json()) as InvokeOutput;
-  console.log(`id: ${id}`);
+  // Default: print ONLY the result, so `… | jq` etc. get clean output. `--verbose`
+  // adds the id, settlement receipt, and metering.
+  const verbose = values.verbose === true;
+  if (verbose) console.log(`id: ${id}`);
   console.log(JSON.stringify(out.result, null, 2));
-  if (out.receipt) console.log(`\nsettled: ${out.receipt.txid}\n${out.receipt.explorerUrl}`);
-
-  const m = out.metering;
-  if (timings.paidMs !== undefined) {
-    // Paid path: report the x402-payment→VM-response e2e latency (the key
-    // serverless metric) with the server-side settle vs. VM breakdown.
-    const settle = m.settleMs !== undefined ? `settle ${Math.round(m.settleMs)}ms · ` : '';
-    console.log(
-      `\ne2e: ${Math.round(timings.paidMs)}ms payment→response  ` +
-        `(${settle}vm ${m.vmWallMs}ms)  profile=${m.profile}`,
-    );
-  } else {
-    // Free path (no 402): just the VM wall-clock.
-    console.log(`\n(${m.profile}, ${m.vmWallMs}ms)`);
+  if (verbose) {
+    if (out.receipt) console.log(`\nsettled: ${out.receipt.txid}\n${out.receipt.explorerUrl}`);
+    const m = out.metering;
+    if (timings.paidMs !== undefined) {
+      // Paid path: report the x402-payment→VM-response e2e latency (the key
+      // serverless metric) with the server-side settle vs. VM breakdown.
+      const settle = m.settleMs !== undefined ? `settle ${Math.round(m.settleMs)}ms · ` : '';
+      console.log(
+        `\ne2e: ${Math.round(timings.paidMs)}ms payment→response  ` +
+          `(${settle}vm ${m.vmWallMs}ms)  profile=${m.profile}`,
+      );
+    } else {
+      // Free path (no 402): just the VM wall-clock.
+      console.log(`\n(${m.profile}, ${m.vmWallMs}ms)`);
+    }
   }
 }
 
@@ -239,7 +281,7 @@ async function cmdInvokeLocal(
   args: string[],
   profile: string,
   id: string | undefined,
-  opts: { keep: boolean; console: boolean },
+  opts: { keep: boolean; console: boolean; verbose: boolean },
 ): Promise<void> {
   // --console streams the guest serial console live to stderr as it boots, so a
   // failing/hanging boot is visible without digging into boot.log afterwards.
@@ -264,9 +306,9 @@ async function cmdInvokeLocal(
     return; // keep the dir on failure for debugging
   }
 
-  console.log(`id: ${res.id}`);
+  if (opts.verbose) console.log(`id: ${res.id}`);
   console.log(JSON.stringify(res.output.result, null, 2));
-  console.log(`\n(${profile}, ${res.vmWallMs}ms, local)`);
+  if (opts.verbose) console.log(`\n(${profile}, ${res.vmWallMs}ms, local)`);
   if (opts.keep) console.log(`instance: ${res.instanceDir}`);
   else await res.cleanup();
 }
@@ -404,6 +446,7 @@ export async function run(): Promise<void> {
       'local-test': { type: 'boolean' }, // run the VM locally; no server/payment
       keep: { type: 'boolean' }, // keep the local-test instance dir for inspection
       console: { type: 'boolean' }, // stream the guest serial console live (local-test)
+      verbose: { type: 'boolean', short: 'v' }, // print id + metering + receipt, not just the result
       force: { type: 'boolean' },
       mnemonic: { type: 'string' },
       network: { type: 'string' }, // handled by the entry shim; accepted here

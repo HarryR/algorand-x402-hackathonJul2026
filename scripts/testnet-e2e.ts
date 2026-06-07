@@ -161,6 +161,9 @@ async function main(): Promise<void> {
     'hello',
     '--profile',
     PROFILE,
+    // The harness asserts on the id/settlement/e2e lines, which are verbose-only
+    // (the CLI prints just the result by default).
+    '--verbose',
   ];
 
   // --- Check 1: local invoke (--local-test) — prove the VM/package/guest path

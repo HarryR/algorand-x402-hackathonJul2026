@@ -59,7 +59,7 @@ export function wrapLuaHandler(source: string): string {
  * loader resolves `require('<module>')` to it. Used by `invoke` when there's no
  * `--pkg` (piped Lua) or a bare `.lua` file is given.
  */
-export function luaModulePackage(source: string, moduleName = 'main'): PackageZip {
+export function luaModulePackage(source: string, moduleName = 'app'): PackageZip {
   const wrapped = wrapLuaHandler(source);
   const entries: ZipEntry[] = [
     { path: `${moduleName}/init.lua`, data: new TextEncoder().encode(wrapped) },
