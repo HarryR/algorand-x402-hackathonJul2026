@@ -1,176 +1,140 @@
 # lualambda
 
-x402-powered Lua lambda functions, settled on Algorand. Deploy a directory of
-Lua, pay per invocation over [x402](https://x402.org), and your code runs inside
-a hardware-isolated [MicroNT](https://github.com/HarryR/nt365) QEMU microVM with
-LuaJIT.
+Pay-per-run Lua. Every call boots a hardware-isolated microVM running an
+NT-compatible kernel, runs your code, settles a fraction of a cent of USDC on
+Algorand, hands back the result, and then deletes the VM. All of that, to
+compute `2 + 2`.
 
-See [OUTLINE.md](./OUTLINE.md) for the full design, rationale, and build plan.
+It is "serverless" in the sense that there is, in fact, a server — it's just a
+[MicroNT](https://github.com/HarryR/nt365) + LuaJIT QEMU microVM that exists for
+a few seconds and is then never spoken of again.
 
-See [hackathon presentation](https://docs.google.com/presentation/d/1P8DxG34sZoJQHEu3WijpxBsueuJsHZWx77lmKm18Cv4/edit?usp=sharing)
+## Quick start
 
-## Status
-
-**Working end-to-end on Algorand testnet.** A paid `invoke` has run for real: the
-CLI signs a USDC payment on the 402, the orchestrator verifies+settles via the
-GoPlausible facilitator (fee-sponsored), then boots a MicroNT microVM and returns
-the result + an on-chain settlement receipt. Milestones 0–2 are done; the
-vmlinux + initrd are embedded in the compiled binary (no host artifacts needed).
-
-## Model
-
-There is no "deployed function." An **invocation** is a set of package zips + a
-module to `require` + an array of args, identified by an **opaque idempotency id**
-(a deterministic hash of the inputs, or a nametag) chosen by the client. The zips
-are placed in the guest's `\SystemRoot\pkg\`; MicroNT's Lua loader resolves
-`require('blah.dorp')` to `\SystemRoot\pkg\blah.zip\blah\dorp.lua`.
-
-```
-GET  /invoke               discovery: profiles, prices, URL scheme
-GET  /invoke/:id           status only (state + package/arg hashes + expiry)
-POST /invoke/:id/:profile  priced, x402-gated; one paid profile per id
-                           multipart: package zips + JSON spec { require, args }
-GET  /invoke/:id/output    retained output for the profile's window; 410 when gone
-```
-
-The profile (and thus price, retention window, and max output) is chosen **at pay
-time** via the URL path. You can't pay twice for the same id (→ 409).
-
-## Dev
-
-Everything runs inside the [devcontainer](.devcontainer/) (npm supply-chain
-isolation, QEMU in TCG mode, throwaway testnet key only).
+Grab the `lualambda` binary from the [Releases](../../releases) page and make it
+executable. It's one self-contained file — the Bun runtime and the MicroNT kernel
+and initrd are baked in, so there's nothing else to download. The VM features
+need `qemu-system-x86_64` on your PATH; the wallet and client bits don't.
 
 ```bash
-bun install
-bun run typecheck
-bun test
-
-bun run dev        # start the orchestrator on :8402
-bun run cli -- profiles
-bun run cli -- discover
-bun run cli -- invoke --pkg ./examples/hello --require hello --arg Algorand --profile small
-# --pkg accepts a directory (zipped in-process) or an existing .zip (uploaded verbatim)
-bun run cli -- status <id>
-bun run cli -- output <id>
-
-# Raw Lua — no packaging needed. With no --pkg, a Lua script is read from stdin
-# (or pass a single .lua file); --require defaults to the module/file name.
-echo 'return 2 + 2' | bun run cli -- invoke
-bun run cli -- invoke < script.lua
-bun run cli -- invoke --pkg ./hello.lua --arg world
-# A bare script, a value-returner, or a full `return function(args) ... end`
-# module all work; whatever you return is the JSON output.
+tar xzf lualambda-*-linux-x64.tar.gz
+chmod +x lualambda
+./lualambda --help
 ```
 
-## Paid invoke on Algorand testnet
-
-The free path above runs with payments off. To exercise the real x402 loop:
+Run some Lua in a real microVM — no server, no wallet, no payment:
 
 ```bash
-# 1. Client wallet (the payer). Prints address + a QR for funding from a phone.
-bun run cli -- wallet create
-bun run cli -- wallet opt-in          # opt the payer into testnet USDC (ASA 10458941)
-#    fund it: ALGO https://lora.algokit.io/testnet/fund  ·  USDC https://faucet.circle.com/
-bun run cli -- wallet status          # confirm ALGO + USDC balances
-
-# 2. The receiver (payTo) must ALSO be opted into USDC to receive it. Use a wallet
-#    you control; opt it in once (e.g. via Pera, or `wallet opt-in` from it).
-
-# 3. Run the orchestrator with payments enforced (payTo = the receiver address):
-LUALAMBDA_PAY_TO=<your-receiver-address> bun run dev
-
-# 4. Pay-per-run: 402 -> sign USDC -> settle -> VM -> result + receipt.
-bun run cli -- invoke --pkg ./examples/hello --require hello --arg Algorand --profile nano
-#   -> { "greeting": "hello Algorand" }
-#      settled: <txid>   https://lora.algokit.io/testnet/tx/<txid>
+echo 'return 2 + 2' | ./lualambda invoke --local-test
+# -> 4
 ```
 
-### Automated testnet check
+That booted a microVM, ran your Lua inside it, framed the result back over a
+socket, and tore the VM down. By default you get just the result (so `| jq` is
+happy); add `-v` for the id and timing.
 
-[scripts/testnet-e2e.ts](scripts/testnet-e2e.ts) runs the whole loop end-to-end
-against the live facilitator and a real VM, then asserts on it — a repeatable
-version of the runbook above. It is **not** part of `bun test` / CI (it needs
-QEMU, the network, and funds); run it on demand:
+A bare expression, a returned value, or a full `function(args)` all work —
+whatever you return is the JSON output:
 
 ```bash
-./e2e-test.sh <receiver>                          # ~$0.001 USDC for one nano invoke
-# or: LUALAMBDA_PAY_TO=<receiver> bun run testnet:e2e
-```
-
-It hard-refuses anything but testnet, reads the wallet **read-only** (never
-writes it), and runs the orchestrator in a throwaway workdir. Checks: a local
-invoke boots the VM for free first (so a broken VM fails before any spend), then
-a paid invoke settles (real txid), re-paying the same id returns `409`, and
-`--max-price` below the price aborts before signing. `payTo` defaults to the
-project receiver; override with `LUALAMBDA_PAY_TO`.
-
-Notes: the facilitator **fee-sponsors** the payment group, so neither the payer
-nor the orchestrator needs ALGO for the transfer (only a little for the one-time
-opt-in). Payments are enforced only when `LUALAMBDA_PAY_TO` is set; otherwise the
-orchestrator runs free. `--network testnet|mainnet` (default testnet) selects the
-USDC ASA + CAIP-2 bundle. Re-invoking the same inputs returns `409` (no double
-charge). The payer key lives at `~/.config/lualambda/wallet.json` (or
-`LUALAMBDA_MNEMONIC`); testnet throwaway keys only.
-
-## Guest isolation
-
-Guests share QEMU's SLIRP user-mode network, where every VM's `10.0.2.2` maps to
-the host loopback — so without care one guest could reach another's connect-back
-port (leaking that tenant's code/args or poisoning its result). The guard is a
-**per-instance connect-back token**: each VM gets a fresh secret on its (private)
-kernel cmdline, and the host releases the stager — and accepts a result — only
-after the connecting guest presents that token. A different guest reaching the
-port gets nothing and can't poison it.
-
-## Layout
-
-```
-src/
-  cli/           entry shim (main.ts: role dispatch) + CLI/wallet (run.ts)
-  orchestrator/  HTTP API, store, QEMU launcher (vm.ts), instance prep,
-                 connect-back record protocol, host-sent stager, ports
-  guest/         overlay/ merged into the upstream initrd (port-fix agent);
-                 the connect-back agent itself ships baked into initrd.zip
-  shared/        wire contracts, profiles, config, zip read/write,
-                 fat16 + mbr + drive (pure-TS FAT16 disk builder)
-examples/hello/  sample package (zips to hello.zip, required as `hello`)
-build.sh         build the single binary into build/<target>/ (default linux-x64)
-.github/         CI: full build; release tags (v*) publish binaries
+echo 'return { hello = "world" }' | ./lualambda invoke --local-test
+echo 'return function(a) return "hi "..(a[1] or "there") end' \
+  | ./lualambda invoke --arg Algorand --local-test
 ```
 
 ## One binary, three roles
 
-A single executable is the **client**, the **wallet**, and the **orchestrator** —
-the role is chosen by the first argument:
+The same executable is the client, the wallet, and the orchestrator. The first
+argument picks the role:
 
 ```bash
-lualambda serve [--port <n>] [--pay-to <addr>]   # run the orchestrator (HTTP API)
-lualambda invoke …                               # client (pays + drives an invoke)
-lualambda invoke … --local-test                  # boot the VM locally, no server
-lualambda wallet …                               # wallet
+lualambda invoke …      # run code (locally with --local-test, or against a server)
+lualambda serve         # be the orchestrator — the HTTP API (needs QEMU)
+lualambda wallet …      # an Algorand wallet (create / fund / opt-in / status)
 ```
 
-Everything ships in the one file — the Bun runtime and the embedded MicroNT
-artifacts (`vmlinux` + `initrd`) are bundled once, so the download is a single
-~100 MB binary rather than two. `serve` reads its config from the environment
-(`LUALAMBDA_PORT`, `LUALAMBDA_PAY_TO`, `LUALAMBDA_WORKDIR`, `LUALAMBDA_NETWORK`);
-`--port`/`--pay-to` are convenience flags for the two most common knobs.
+## Pay-per-run on Algorand testnet
 
-## Build the binary
-
-`build.sh` compiles the single `lualambda` binary into `build/<target>/`
-(gitignored). Defaults to Linux x86_64; pass a Bun target to build for another
-platform.
+The real loop: the client signs a USDC payment in response to an HTTP 402, the
+orchestrator verifies and settles it through the GoPlausible facilitator, boots
+the VM, and returns your result plus an on-chain receipt.
 
 ```bash
-./build.sh                 # build/linux-x64/
-./build.sh linux-arm64     # build/linux-arm64/
-./build.sh darwin-arm64    # build/darwin-arm64/   (expand to mac/windows later)
-./build.sh windows-x64     # build/windows-x64/    (.exe suffix added)
-# or: bun run build
+# 1. A throwaway payer wallet (prints an address + a QR you can fund from a phone).
+lualambda wallet create
+lualambda wallet opt-in        # opt the payer into testnet USDC (ASA 10458941)
+#   fund it:  ALGO  https://lora.algokit.io/testnet/fund
+#             USDC  https://faucet.circle.com/
+lualambda wallet status        # check balances
+
+# 2. Start an orchestrator that enforces payment. The receiver must also be
+#    opted into USDC to receive it.
+lualambda serve --pay-to <your-receiver-address>
+
+# 3. In another terminal: 402 -> sign USDC -> settle -> VM -> result + receipt.
+echo 'return function(a) return { greeting = "hello "..(a[1] or "world") } end' \
+  | lualambda invoke --arg Algorand --profile nano -v
+#   -> { "greeting": "hello Algorand" }
+#      settled: <txid>   https://lora.algokit.io/testnet/tx/<txid>
 ```
 
-CI ([.github/workflows/build.yml](.github/workflows/build.yml)) runs typecheck +
-lint + tests + build on every push/PR. Pushing a `v*` tag additionally publishes
-a GitHub Release with the binary attached (one tarball per target).
+The facilitator fee-sponsors the payment group, so neither side needs ALGO for
+the transfer (only a little for the one-time opt-in). Drop `--pay-to` and the
+orchestrator runs free. The payer key lives at `~/.config/lualambda/wallet.json`
+(or `LUALAMBDA_MNEMONIC`) — testnet throwaway keys only, please.
+
+## How it works
+
+There's no "deployed function." An invocation is a set of package zips + a module
+to `require` + an array of args, keyed by an opaque id (a hash of the inputs, or
+any nametag you pick). The zips land in the guest's `\SystemRoot\pkg\`, and
+MicroNT's Lua loader resolves `require('blah.dorp')` to
+`\SystemRoot\pkg\blah.zip\blah\dorp.lua`.
+
+```
+GET  /invoke               discovery: profiles, prices, URL scheme
+GET  /invoke/:id           status (state + hashes + expiry)
+POST /invoke/:id/:profile  priced, x402-gated; one paid profile per id
+                           multipart: package zips + JSON spec { require, args }
+GET  /invoke/:id/output    retained output for the profile's window; 410 once gone
+```
+
+You choose the profile — and so the price, CPU/memory, retention window, and
+output cap — at pay time, via the URL. You can't pay twice for the same id (you
+get a 409).
+
+Guests share QEMU's user-mode network, so each VM has to present a per-instance
+connect-back token before the orchestrator hands it any code or accepts a result.
+One guest can't read or poison another's invocation.
+
+## Run from source
+
+Everything runs inside the [devcontainer](.devcontainer/) (supply-chain
+isolation, QEMU in TCG mode, a throwaway testnet key).
+
+```bash
+bun install
+bun test
+bun run dev                                          # orchestrator on :8402
+bun run cli -- invoke --pkg ./examples/hello --require hello --arg Algorand --local-test
+```
+
+`--pkg` takes a directory (zipped in-process) or an existing `.zip` (uploaded
+verbatim). With no `--pkg`, Lua is read from stdin or a single `.lua` file.
+
+## Build
+
+`build.sh` compiles the single binary into `build/<target>/` — Linux x64 by
+default; pass a Bun target (e.g. `darwin-arm64`, `windows-x64`) for others:
+
+```bash
+./build.sh
+```
+
+CI builds and tests on every push. Pushing a `v*` tag publishes a GitHub Release
+with the binary attached and a signed build-provenance attestation.
+
+## More
+
+Design notes live in [OUTLINE.md](./OUTLINE.md). There are also
+[hackathon slides](https://docs.google.com/presentation/d/1P8DxG34sZoJQHEu3WijpxBsueuJsHZWx77lmKm18Cv4/edit?usp=sharing).
